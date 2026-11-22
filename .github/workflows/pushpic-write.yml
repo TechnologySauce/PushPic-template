@@ -2,7 +2,7 @@ name: PushPic Secure Write
 
 # 服务端写入：令牌只以加密 Secret 存在于 GitHub Actions，浏览器不再持有写入凭证。
 # 浏览器通过 repository_dispatch 提交请求；工作流用最小权限 GITHUB_TOKEN 完成仓库写入。
-# 安全加固（v2.1）：最小权限令牌 + magic bytes 内容校验 + HMAC 防重放。
+# 安全加固（v2.1）：最小权限 GITHUB_TOKEN + magic bytes 内容校验 + 时效/nonce 防重放。
 on:
   repository_dispatch:
     types: [pushpic-upload, pushpic-delete]
@@ -23,8 +23,8 @@ jobs:
         uses: actions/github-script@v7
         with:
           # 使用 GitHub 自动签发的最小权限 GITHUB_TOKEN（contents:write），
-          # 不再使用可泄露的高权限 PAT。设置 GITHUB_TOKEN_SECRET 可覆盖为加密 Secret。
-          github-token: ${{ secrets.PUSHPIC_TOKEN || github.token }}
+          # 会话级、自动轮换、仅限本仓；彻底不再读取任何长期高权限 PAT。
+          github-token: ${{ github.token }}
           script: |
             const crypto = require('crypto');
             const zlib = require('zlib');
