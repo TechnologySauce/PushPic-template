@@ -203,3 +203,31 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-si
 .site-footer p { margin: 0; }
 .site-footer a { color: var(--primary); text-decoration: none; }
 .site-footer a:hover { text-decoration: underline; }
+
+/* 图库工具栏左侧控件：收藏筛选 + 每页数量 */
+.toolbar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.chip {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  padding: 3px 10px; border-radius: 999px; font: inherit; font-size: 11px; cursor: pointer;
+  transition: background .2s, color .2s, border-color .2s;
+}
+.chip:hover { border-color: var(--primary); color: var(--text); }
+.chip[aria-pressed="true"] { background: rgba(255,187,87,.15); color: #ffbb57; border-color: #ffbb57; }
+.page-size-label { display: inline-flex; align-items: center; gap: 5px; }
+.select-sm { padding: 3px 6px; font-size: 11px; }
+
+/* 卡片收藏按钮 */
+.tile-star {
+  position: absolute; top: 6px; right: 6px; z-index: 2;
+  width: 30px; height: 30px; border: none; border-radius: 50%;
+  background: rgba(0,0,0,.45); color: #fff; font-size: 17px; line-height: 30px;
+  cursor: pointer; padding: 0; transition: background .2s, transform .15s;
+}
+.tile-star:hover { background: rgba(0,0,0,.7); transform: scale(1.08); }
+.tile-star.is-fav { color: #ffbb57; }
+.tile-media { position: relative; }
+
+/* 卡片操作区：下载 / Markdown / 复制 / 删除 两行排列 */
+.tile-actions { flex-wrap: wrap; }
+.tile-actions .btn { flex: 1 1 45%; }
+.tile-actions .btn-wide { flex: 1 1 100%; }
