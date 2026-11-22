@@ -8,17 +8,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="PushPic - 打开即用的 GitHub Pages 图床，图片直接上传到部署仓库" />
   <!-- 严格 CSP：脚本仅同源，禁止内联脚本/eval；API 与图片源显式白名单；阻断点击劫持。 -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob: https://raw.githubusercontent.com https://*.githubusercontent.com; connect-src 'self' https://api.github.com https://raw.githubusercontent.com; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob: https://raw.githubusercontent.com https://*.githubusercontent.com https://*.github.io; connect-src 'self' https://api.github.com https://raw.githubusercontent.com; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" />
   <meta name="referrer" content="strict-origin-when-cross-origin" />
-  <link rel="icon" type="image/x-icon" href="./assets/favicon.ico?v=b7c3d9e1" />
-  <link rel="apple-touch-icon" href="./assets/img/logo-180.png?v=b7c3d9e1" />
+  <link rel="icon" type="image/x-icon" href="./assets/favicon.ico?v=5bb5e820" />
+  <link rel="apple-touch-icon" href="./assets/img/logo-180.png?v=5bb5e820" />
   <title>PushPic · 开箱即用图床</title>
-  <link rel="stylesheet" href="./assets/style.css?v=b7c3d9e1" />
+  <!-- 性能：提前与 API / 图片源握手，降低首次加载延迟。 -->
+  <link rel="preconnect" href="https://api.github.com" crossorigin />
+  <link rel="preconnect" href="https://raw.githubusercontent.com" crossorigin />
+  <link rel="stylesheet" href="./assets/style.css?v=5bb5e820" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <img class="brand-mark" src="./assets/img/logo-180.png?v=b7c3d9e1" alt="PushPic logo" />
+      <img class="brand-mark" src="./assets/img/logo-180.png?v=5bb5e820" alt="PushPic logo" />
       <div>
         <h1>PushPic</h1>
         <p>Simple image hosting powered by GitHub Pages</p>
@@ -117,7 +120,7 @@
     </div>
   </div>
 
-  <script src="./assets/config.js?v=b7c3d9e1"></script>
-  <script src="./assets/app.js?v=b7c3d9e1"></script>
+  <script src="./assets/config.js?v=5bb5e820"></script>
+  <script src="./assets/app.js?v=5bb5e820"></script>
 </body>
 </html>
