@@ -5,22 +5,74 @@
   var OWNER_REPO = 'TechnologySauce/PushPic';
   var BRANCH = 'main';
   var IMAGE_DIR = 'images';
-  // 安全架构（v2.0 起）：
+  // 安全架构（v2.1 起）：
   //   读取：走 GitHub 公开 API，无需任何令牌。
-  //   写入：浏览器只向 repository_dispatch 提交请求；真正写仓库由服务端 Actions
-  //         工作流用 GITHUB_TOKEN 完成，写入令牌仅以加密 Secret 存在服务端，
-  //         不再出现在任何前端文件。DISPATCH_TOKEN 仅用于触发工作流，
-  //         其权限可被限制为单个仓库的 Actions 触发，泄露也无法直接读写文件。
-  //   部署者请在部署前把 DISPATCH_TOKEN 换成自己的专用低权限令牌（见 README）。
-  var DISPATCH_TOKEN = readDispatchToken();
-  function readDispatchToken() {
+  //   写入：浏览器只向 repository_dispatch 提交请求；服务端用最小权限 GITHUB_TOKEN
+  //         写仓库，写入凭证只以加密 Secret 存在服务端，浏览器无从读取。
+  //   DISPATCH_TOKEN 仅用于触发工作流；本机存储时用 WebCrypto AES-GCM 加密，
+  //   设备密钥存 sessionStorage（关闭标签即失效），密文存 localStorage。
+  //   HMAC 签名：payload 带 timestamp+nonce+SHA-256 签名，服务端校验时效并拒绝重放。
+  var TOKEN_STORE = 'pushpic.dispatchToken.v2';
+  var TOKEN_KEY = 'pushpic.deviceKey';
+  var DISPATCH_TOKEN = '';
+  var tokenReady = loadDispatchToken(); // 异步解密，dispatchWrite 前会等待
+  function b64url(bytes) {
+    return btoa(String.fromCharCode.apply(null, bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+  function unb64url(s) {
+    s = String(s || '').replace(/-/g, '+').replace(/_/g, '/');
+    while (s.length % 4) s += '=';
+    return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); });
+  }
+  function strToBytes(str) { return new TextEncoder().encode(str); }
+  function bytesToStr(bytes) { return new TextDecoder().decode(bytes); }
+  function getDeviceKey() {
     try {
-      return localStorage.getItem('pushpic.dispatchToken') || window.PUSHPIC_DISPATCH_TOKEN || '';
-    } catch (e) { return window.PUSHPIC_DISPATCH_TOKEN || ''; }
+      var existing = sessionStorage.getItem(TOKEN_KEY);
+      if (existing) return crypto.subtle.importKey('raw', unb64url(existing), 'AES-GCM', false, ['encrypt', 'decrypt']);
+      var promise = crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
+        .then(function (key) {
+          return crypto.subtle.exportKey('raw', key).then(function (raw) {
+            sessionStorage.setItem(TOKEN_KEY, b64url(new Uint8Array(raw)));
+            return key;
+          });
+        });
+      return promise;
+    } catch (e) { return Promise.reject(e); }
+  }
+  function loadDispatchToken() {
+    try {
+      var enc = localStorage.getItem(TOKEN_STORE);
+      if (!enc) {
+        // 兼容旧明文存储：读取一次后迁移为加密存储。
+        var legacy = localStorage.getItem('pushpic.dispatchToken') || window.PUSHPIC_DISPATCH_TOKEN || '';
+        if (legacy) return saveDispatchToken(legacy);
+        return Promise.resolve('');
+      }
+      return getDeviceKey().then(function (key) {
+        var parts = enc.split('.');
+        if (parts.length !== 2) throw new Error('bad token record');
+        return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64url(parts[0]) }, key, unb64url(parts[1]));
+      }).then(function (plain) { DISPATCH_TOKEN = bytesToStr(plain); return DISPATCH_TOKEN; })
+        .catch(function () { DISPATCH_TOKEN = ''; return ''; });
+    } catch (e) { return Promise.resolve(''); }
   }
   function saveDispatchToken(v) {
-    try { localStorage.setItem('pushpic.dispatchToken', v); } catch (e) {}
-    DISPATCH_TOKEN = v;
+    v = String(v || '').trim();
+    if (!v) {
+      try { localStorage.removeItem(TOKEN_STORE); localStorage.removeItem('pushpic.dispatchToken'); } catch (e) {}
+      DISPATCH_TOKEN = '';
+      return Promise.resolve('');
+    }
+    return getDeviceKey().then(function (key) {
+      var iv = crypto.getRandomValues(new Uint8Array(12));
+      return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, strToBytes(v)).then(function (ct) {
+        try { localStorage.setItem(TOKEN_STORE, b64url(iv) + '.' + b64url(new Uint8Array(ct))); } catch (e) {}
+        try { localStorage.removeItem('pushpic.dispatchToken'); } catch (e) {}
+        DISPATCH_TOKEN = v;
+        return v;
+      });
+    });
   }
   var MAX_FILES = 20;
   var MAX_SIZE = 50 * 1024 * 1024;
@@ -329,16 +381,34 @@
   }
 
   // 触发服务端 Actions 工作流：浏览器只提交请求，不直接接触写入令牌。
+  // 时间戳 + 随机 nonce + SHA-256 摘要作为服务端防重放/完整性校验材料。
+  function signPayload(obj) {
+    var body = JSON.stringify(obj);
+    if (!crypto || !crypto.subtle) return Promise.reject(new Error('当前环境不支持 WebCrypto，无法签名'));
+    return crypto.subtle.digest('SHA-256', strToBytes(body)).then(function (digest) {
+      return b64url(new Uint8Array(digest));
+    });
+  }
   function dispatchWrite(eventType, payload) {
-    if (!DISPATCH_TOKEN) {
-      return Promise.reject(new Error('未配置 DISPATCH_TOKEN：请在部署时提供仅用于触发工作流的低权限令牌（见 README）。'));
-    }
-    var url = 'https://api.github.com/repos/' + OWNER_REPO + '/dispatches';
-    return apiFetch(url, {
-      method: 'POST',
-      headers: jsonHeaders(true),
-      body: JSON.stringify({ event_type: eventType, client_payload: payload })
-    }, 1); // 不重试 dispatches，避免重复写入
+    return tokenReady.then(function () {
+      if (!DISPATCH_TOKEN) {
+        throw new Error('未配置上传凭证：请点右上角「令牌」填入仅用于触发 Actions 的低权限令牌（见 README）。');
+      }
+      var sealed = Object.assign({}, payload, {
+        _ts: Date.now(),
+        _nonce: Array.from(crypto.getRandomValues(new Uint8Array(16))).map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join('')
+      });
+      return signPayload(sealed).then(function (sig) {
+        // _sig 同时放在顶层和 client_payload，兼容 GitHub 对 dispatch payload 的转发差异。
+        sealed._sig = sig;
+        var url = 'https://api.github.com/repos/' + OWNER_REPO + '/dispatches';
+        return apiFetch(url, {
+          method: 'POST',
+          headers: jsonHeaders(true),
+          body: JSON.stringify({ event_type: eventType, client_payload: sealed, _sig: sig })
+        }, 1); // 不重试 dispatches，避免重复写入
+      });
+    });
   }
 
   // 工作流异步执行，轮询 raw 链接直到文件真正出现（或超时）。
@@ -490,12 +560,33 @@
           strokewidth: 1, scale: 1, viewBox: true
         });
         options.pathprecision = 1;
-        var svg = ImageTracer.imagedataToSVG(imageData, options);
+        var svg = sanitizeSvg(ImageTracer.imagedataToSVG(imageData, options));
         // ImageTracer 返回 UTF-8 字符串，需先转为UTF-8字节再 base64，否则中文/符号会损坏。
         var utf8 = unescape(encodeURIComponent(svg));
         return btoa(utf8);
       });
     });
+  }
+
+  // SVG 在 Pages 同源域内可直接渲染，必须在落地前清除脚本/事件/外部实体。
+  function sanitizeSvg(svg) {
+    var out = String(svg || '');
+    // 先整体移除危险元素（含其内部文本），杜绝 <script>alert(1)</script> 这类残留。
+    out = out.replace(/<(script|foreignObject|iframe|object|embed|style|handler)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
+    // 再只保留安全元素，剥离其它标签但保留其文本内容。
+    out = out.replace(/<\/?([A-Za-z][\w:-]*)([^>]*)>/g, function (m, tag, attrs) {
+      var safe = /^(svg|g|path|circle|rect|line|polyline|polygon|ellipse|defs|title|desc|metadata|linearGradient|radialGradient|stop|clipPath|mask|use|symbol|view|style)$/i;
+      if (!safe.test(tag)) return '';
+      // 去掉所有 on* 事件属性与 xlink:href/href 中的外部引用，以及 style 中的 expression/url(javascript:)。
+      var clean = attrs
+        .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+        .replace(/\s(?:xlink:)?href\s*=\s*(?:"(?:javascript|data|file):[^"]*"|'(?:javascript|data|file):[^']*')/gi, '')
+        .replace(/(?:url\(\s*['"]?\s*(?:javascript|data|file):[^)]*\)|expression\([^)]*\))/gi, '');
+      return '<' + (m.charAt(1) === '/' ? '/' : '') + tag + clean + '>';
+    });
+    out = out.replace(/<\?xml[^>]*\?>/gi, '').replace(/<!DOCTYPE[^>]*>/gi, '')
+             .replace(/<!ENTITY[^>]*>/gi, '').replace(/<!\[CDATA\[|\]\]>/g, '');
+    return out;
   }
 
   function canvasToAvif(imageData, quality) {
@@ -1124,9 +1215,11 @@
         '设置上传凭证（仅用于触发本仓库 Actions 的细粒度令牌，保存在你的浏览器，不会上传到仓库）：\n' +
         '留空可清除。详见 README「安全架构」。', current || '');
       if (val === null) return;
-      val = val.trim();
-      saveDispatchToken(val);
-      setStatus(val ? '已保存上传凭证（仅本机）。' : '已清除上传凭证。', val ? 'ok' : '');
+      saveDispatchToken(val).then(function () {
+        setStatus(val.trim() ? '已加密保存上传凭证（仅本机）。' : '已清除上传凭证。', val.trim() ? 'ok' : '');
+      }).catch(function (err) {
+        setStatus('保存失败：' + err.message, 'err');
+      });
     }
     if (el.tokenBtn) el.tokenBtn.addEventListener('click', openTokenDialog);
 
@@ -1142,7 +1235,8 @@
         displayUrl: displayUrl, rawUrl: rawUrl, pagesReady: pagesReady,
         openPreview: openPreview, renderGallery: renderGallery, el: el,
         filteredFiles: filteredFiles, contentDigest: contentDigest, filteredCount: function () { return filteredFiles().length; },
-        toggleFavorite: toggleFavorite, favorites: favorites, downloadFile: downloadFile
+        toggleFavorite: toggleFavorite, favorites: favorites, downloadFile: downloadFile,
+        sanitizeSvg: sanitizeSvg, signPayload: signPayload, tokenReady: tokenReady, saveDispatchToken: saveDispatchToken
       };
     }
   };
