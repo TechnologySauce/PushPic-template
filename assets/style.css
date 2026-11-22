@@ -231,3 +231,6 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-si
 .tile-actions { flex-wrap: wrap; }
 .tile-actions .btn { flex: 1 1 45%; }
 .tile-actions .btn-wide { flex: 1 1 100%; }
+
+/* 令牌设置按钮（紧凑） */
+.btn-sm { padding: 4px 10px; font-size: 12px; }
