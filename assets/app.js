@@ -32,6 +32,9 @@
   var INPUT_EXT_SET = INPUT_EXTS.reduce(function (m, e) { m[e] = 1; return m; }, {});
   var IMAGE_EXT = new RegExp('\\.(' + INPUT_EXTS.join('|') + ')$', 'i');
   var FORMAT_KEY = 'pushpic.convertFormat';
+  var FAV_KEY = 'pushpic.favorites';
+  var PAGESIZE_KEY = 'pushpic.pageSize';
+  var FAV_FILTER_KEY = 'pushpic.favFilter';
   var VECTORIZE_LIB = './vendor/imagetracer_v1.2.6.js';
   var AVIF_MODULE = '../vendor/jsquash2/encode.js';
   var TIFF_LIB = './vendor/UTIF.js';
@@ -48,7 +51,8 @@
   ).split(/\s+/).reduce(function (m, e) { m[e] = 1; return m; }, {});
 
   var state = { files: [], page: 1, pageSize: 24, query: '', refreshing: false, lastRefresh: 0,
-    viewFiles: [], previewIndex: -1 };
+    viewFiles: [], previewIndex: -1, favOnly: false };
+  var favorites = loadFavorites();
   var el = {};
   var pendingRequests = {};  // 相同请求并发时复用同一个 Promise，避免重复打 API
   var etagCache = {};        // url -> { etag, data }，配合 If-None-Match 走 304 省流量
@@ -106,6 +110,22 @@
 
   function setConvertFormat(v) {
     try { localStorage.setItem(FORMAT_KEY, v); } catch (e) { /* 隐私模式下忽略 */ }
+  }
+
+  function loadFavorites() {
+    try {
+      var v = JSON.parse(localStorage.getItem(FAV_KEY) || '[]');
+      return Array.isArray(v) ? v.reduce(function (m, p) { m[p] = 1; return m; }, {}) : {};
+    } catch (e) { return {}; }
+  }
+  function saveFavorites() {
+    try { localStorage.setItem(FAV_KEY, JSON.stringify(Object.keys(favorites))); } catch (e) {}
+  }
+  function loadPageSize() {
+    try {
+      var v = localStorage.getItem(PAGESIZE_KEY);
+      return v === 'all' ? 'all' : (parseInt(v, 10) > 0 ? parseInt(v, 10) : 24);
+    } catch (e) { return 24; }
   }
 
   function apiHeaders() {
@@ -528,8 +548,9 @@
   // 多关键词按空格拆分，需全部命中（AND），顺序与预览导航共用。
   function filteredFiles() {
     var words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    if (!words.length) return state.files.slice();
     return state.files.filter(function (f) {
+      if (state.favOnly && !favorites[f.path]) return false;
+      if (!words.length) return true;
       var name = f.name.toLowerCase();
       return words.every(function (w) { return name.indexOf(w) !== -1; });
     });
@@ -538,17 +559,20 @@
   function renderGallery() {
     var files = filteredFiles();
     state.viewFiles = files;
-    var totalPages = Math.max(1, Math.ceil(files.length / state.pageSize));
+    var allPages = state.pageSize === 'all';
+    var totalPages = allPages ? 1 : Math.max(1, Math.ceil(files.length / state.pageSize));
     state.page = Math.min(state.page, totalPages);
-    var start = (state.page - 1) * state.pageSize;
-    var pageFiles = files.slice(start, start + state.pageSize);
+    var start = allPages ? 0 : (state.page - 1) * state.pageSize;
+    var pageFiles = allPages ? files : files.slice(start, start + state.pageSize);
     el.gallery.innerHTML = '';
     if (!pageFiles.length) {
       var p = document.createElement('p');
       p.className = 'empty';
-      p.textContent = state.query.trim()
-        ? '没有匹配「' + state.query.trim() + '」的图片。'
-        : (state.files.length ? '没有匹配的文件。' : '仓库中还没有图片，上传一张试试吧。');
+      p.textContent = state.favOnly
+        ? '还没有收藏的图片，点卡片右上角的 ☆ 收藏吧。'
+        : (state.query.trim()
+          ? '没有匹配「' + state.query.trim() + '」的图片。'
+          : (state.files.length ? '没有匹配的文件。' : '仓库中还没有图片，上传一张试试吧。'));
       el.gallery.appendChild(p);
     }
     pageFiles.forEach(function (file) {
@@ -556,6 +580,18 @@
       var tile = document.createElement('div');
       tile.className = 'tile';
       tile.dataset.path = file.path;
+      var media = document.createElement('div');
+      media.className = 'tile-media';
+      var star = document.createElement('button');
+      star.type = 'button';
+      star.className = 'tile-star' + (favorites[file.path] ? ' is-fav' : '');
+      star.textContent = favorites[file.path] ? '★' : '☆';
+      star.title = favorites[file.path] ? '取消收藏' : '收藏';
+      star.setAttribute('aria-label', star.title);
+      star.addEventListener('click', function (e) {
+        e.stopPropagation();
+        toggleFavorite(file.path);
+      });
       var img = document.createElement('img');
       img.className = 'tile-thumb';
       img.src = file.raw || rawUrl(file.path);
@@ -593,19 +629,35 @@
       copy.type = 'button';
       copy.textContent = '复制链接';
       copy.addEventListener('click', function () { copyText(url, copy); });
+      var md = document.createElement('button');
+      md.className = 'btn btn-ghost';
+      md.type = 'button';
+      md.textContent = 'MD';
+      md.title = '复制 Markdown 代码';
+      md.addEventListener('click', function () { copyText('![' + file.name + '](' + url + ')', md); });
+      var dl = document.createElement('button');
+      dl.className = 'btn btn-ghost';
+      dl.type = 'button';
+      dl.textContent = '下载';
+      dl.addEventListener('click', function () { downloadFile(file); });
       var del = document.createElement('button');
       del.className = 'btn btn-ghost';
       del.type = 'button';
       del.textContent = '删除';
       del.addEventListener('click', function () { deleteFile(file, del); });
       actions.appendChild(copy);
+      actions.appendChild(md);
+      actions.appendChild(dl);
+      del.className = 'btn btn-ghost btn-wide';
       actions.appendChild(del);
-      tile.appendChild(img);
+      media.appendChild(star);
+      media.appendChild(img);
+      tile.appendChild(media);
       tile.appendChild(meta);
       tile.appendChild(actions);
       el.gallery.appendChild(tile);
     });
-    el.pagination.hidden = files.length <= state.pageSize;
+    el.pagination.hidden = allPages || files.length <= state.pageSize;
     el.pageInfo.textContent = state.page + ' / ' + totalPages;
     el.prevBtn.disabled = state.page <= 1;
     el.nextBtn.disabled = state.page >= totalPages;
@@ -649,6 +701,23 @@
       if (!items.length) resolve(results);
       else run();
     });
+  }
+
+  function toggleFavorite(path) {
+    if (favorites[path]) delete favorites[path];
+    else favorites[path] = 1;
+    saveFavorites();
+    renderGallery();
+  }
+
+  function downloadFile(file) {
+    var url = (file.raw || rawUrl(file.path));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   }
 
   function copyText(text, btn) {
@@ -751,10 +820,10 @@
     var btn = el.refreshBtn;
     var label = btn.querySelector('.refresh-label');
     var sub = btn.querySelector('.refresh-sub');
-    if (state.refreshing) return state.refreshPromise;
     var now = Date.now();
     // 手动点击时 800ms 内的重复触发直接忽略，防止连点打爆 API。
     if (force && now - state.lastRefresh < 800) return state.refreshPromise || Promise.resolve(state.files);
+    if (state.refreshing) return state.refreshPromise;
     state.lastRefresh = now;
     state.refreshing = true;
     btn.disabled = true;
@@ -907,7 +976,8 @@
   function init() {
     ['repoBadge', 'pagesBadge', 'dropzone', 'fileInput', 'progressWrap', 'progressBar', 'progressText',
      'status', 'gallery', 'searchInput', 'searchClear', 'resultCount', 'refreshBtn', 'refreshMeta', 'pagination', 'prevBtn', 'nextBtn', 'pageInfo',
-     'previewModal', 'previewName', 'previewImg', 'previewLinks', 'formatSelect', 'formatHint'].forEach(function (id) { el[id] = $(id); });
+     'previewModal', 'previewName', 'previewImg', 'previewLinks', 'formatSelect', 'formatHint',
+     'favFilterBtn', 'pageSizeSelect'].forEach(function (id) { el[id] = $(id); });
 
     var savedFormat = getConvertFormat();
     el.formatSelect.value = savedFormat;
@@ -923,6 +993,30 @@
       setConvertFormat(el.formatSelect.value);
       updateHint();
       setStatus('已保存上传格式设置：' + el.formatSelect.options[el.formatSelect.selectedIndex].text, 'ok');
+    });
+
+    // 恢复分页大小与收藏筛选设置
+    state.pageSize = loadPageSize();
+    el.pageSizeSelect.value = String(state.pageSize);
+    try { state.favOnly = localStorage.getItem(FAV_FILTER_KEY) === '1'; } catch (e) {}
+    function syncFavBtn() {
+      el.favFilterBtn.setAttribute('aria-pressed', state.favOnly ? 'true' : 'false');
+      el.favFilterBtn.textContent = state.favOnly ? '★ 收藏' : '☆ 收藏';
+    }
+    syncFavBtn();
+    el.favFilterBtn.addEventListener('click', function () {
+      state.favOnly = !state.favOnly;
+      state.page = 1;
+      syncFavBtn();
+      try { localStorage.setItem(FAV_FILTER_KEY, state.favOnly ? '1' : '0'); } catch (e) {}
+      renderGallery();
+    });
+    el.pageSizeSelect.addEventListener('change', function () {
+      var v = el.pageSizeSelect.value;
+      state.pageSize = v === 'all' ? 'all' : parseInt(v, 10);
+      state.page = 1;
+      try { localStorage.setItem(PAGESIZE_KEY, v); } catch (e) {}
+      renderGallery();
     });
 
     el.dropzone.addEventListener('click', function () { el.fileInput.click(); });
@@ -982,7 +1076,8 @@
         smartUrl: smartUrl, probeImage: probeImage, probeExisting: probeExisting,
         displayUrl: displayUrl, rawUrl: rawUrl, pagesReady: pagesReady,
         openPreview: openPreview, renderGallery: renderGallery, el: el,
-        filteredFiles: filteredFiles, contentDigest: contentDigest, filteredCount: function () { return filteredFiles().length; }
+        filteredFiles: filteredFiles, contentDigest: contentDigest, filteredCount: function () { return filteredFiles().length; },
+        toggleFavorite: toggleFavorite, favorites: favorites, downloadFile: downloadFile
       };
     }
   };
