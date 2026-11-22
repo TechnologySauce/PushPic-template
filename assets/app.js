@@ -15,9 +15,9 @@
   var INPUT_EXT_SET = INPUT_EXTS.reduce(function (m, e) { m[e] = 1; return m; }, {});
   var IMAGE_EXT = new RegExp('\\.(' + INPUT_EXTS.join('|') + ')$', 'i');
   var FORMAT_KEY = 'pushpic.convertFormat';
-  var VECTORIZE_LIB = '../vendor/imagetracer_v1.2.6.js';
-  var AVIF_MODULE = '../vendor/jsquash2/encode.js';
-  var TIFF_LIB = '../vendor/UTIF.js';
+  var VECTORIZE_LIB = './vendor/imagetracer_v1.2.6.js';
+  var AVIF_MODULE = './vendor/jsquash2/encode.js';
+  var TIFF_LIB = './vendor/UTIF.js';
   // TIFF 系扩展名（含 FlashPIX/EXIF）：浏览器 <img> 打不开，用 UTIF.js 解码。
   var TIFF_EXT = { tif: 1, tiff: 1, exif: 1, fpx: 1 };
   // 原始相机格式扩展名各异，这些通常是 RAW；无法解码时原样上传（无损，不做错误转换）。
