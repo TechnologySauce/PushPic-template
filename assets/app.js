@@ -735,6 +735,7 @@
       img.src = file.raw || rawUrl(file.path);
       img.alt = file.name;
       img.loading = 'lazy';
+      img.decoding = 'async';
       // raw 或 Pages 任一源失败时自动切到另一个，避免裂图。
       img.addEventListener('error', function () {
         var fallback = img.src.indexOf('raw.githubusercontent.com') !== -1
@@ -1210,10 +1211,10 @@
 
     // 令牌设置：拥有者一次性填入「仅触发 Actions」的低权限令牌，保存在本机，不写入仓库。
     function openTokenDialog() {
-      var current = readDispatchToken();
+      var hint = DISPATCH_TOKEN ? '当前已配置上传凭证。' : '当前未配置上传凭证（只读模式）。';
       var val = window.prompt(
-        '设置上传凭证（仅用于触发本仓库 Actions 的细粒度令牌，保存在你的浏览器，不会上传到仓库）：\n' +
-        '留空可清除。详见 README「安全架构」。', current || '');
+        hint + '\n\n设置上传凭证（仅用于触发本仓库 Actions 的细粒度令牌，加密保存在你的浏览器）：\n' +
+        '留空可清除。详见 README「安全架构」。', '');
       if (val === null) return;
       saveDispatchToken(val).then(function () {
         setStatus(val.trim() ? '已加密保存上传凭证（仅本机）。' : '已清除上传凭证。', val.trim() ? 'ok' : '');
