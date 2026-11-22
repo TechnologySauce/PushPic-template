@@ -17,6 +17,11 @@
   var el = {};
   var pendingRequests = {};  // 相同请求并发时复用同一个 Promise，避免重复打 API
   var etagCache = {};        // url -> { etag, data }，配合 If-None-Match 走 304 省流量
+  var pagesReady = {};       // path -> true/false：图片是否已在 Pages 上生效
+  var probeDone = {};        // path -> true：本次会话已探测过，避免重复请求
+  var deployTimers = {};     // path -> timer：后台部署探测计时器
+  var PROBE_INTERVAL = 3000;
+  var PROBE_MAX = 24;        // 最多探测约 72 秒
 
   function $(id) { return document.getElementById(id); }
 
@@ -91,6 +96,95 @@
 
   function rawUrl(path) {
     return 'https://raw.githubusercontent.com/' + OWNER_REPO + '/' + BRANCH + '/' + encodePath(path);
+  }
+
+  // 用 Image 加载探测链接是否可用（img 跨域无需 CORS 头），加随机参数破 CDN 缓存。
+  function probeImage(url, timeout) {
+    return new Promise(function (resolve) {
+      var img = new Image();
+      var done = false;
+      var timer = setTimeout(function () { finish(false); }, timeout || 6000);
+      function finish(ok) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        img.onload = img.onerror = null;
+        resolve(ok);
+      }
+      img.onload = function () { finish(true); };
+      img.onerror = function () { finish(false); };
+      img.src = url + (url.indexOf('?') === -1 ? '?' : '&') + '_probe=' + Date.now();
+    });
+  }
+
+  // 图床主链接：Pages 已生效就用 Pages（短、适合外链），否则用立即可用的 raw，避免复制到 404 链接。
+  function smartUrl(file) {
+    return pagesReady[file.path] ? displayUrl(file.path) : (file.raw || rawUrl(file.path));
+  }
+
+  function updatePagesBadge() {
+    if (!el.pagesBadge) return;
+    var pending = state.files.filter(function (f) { return !pagesReady[f.path]; }).length;
+    if (!state.files.length) {
+      el.pagesBadge.textContent = '图片库';
+      el.pagesBadge.className = 'badge';
+    } else if (pending === 0) {
+      el.pagesBadge.textContent = '全部已上线';
+      el.pagesBadge.className = 'badge badge-ok';
+    } else {
+      el.pagesBadge.textContent = pending + ' 张部署中';
+      el.pagesBadge.className = 'badge badge-warn';
+    }
+  }
+
+  function setTileReady(path) {
+    var sel = '[data-path]';
+    var tiles = el.gallery.querySelectorAll(sel);
+    for (var i = 0; i < tiles.length; i++) {
+      if (tiles[i].dataset.path !== path) continue;
+      var badge = tiles[i].querySelector('.tile-ready');
+      if (badge) {
+        badge.textContent = pagesReady[path] ? '已上线' : '部署中';
+        badge.className = 'tile-ready ' + (pagesReady[path] ? 'ready' : 'pending');
+      }
+      break;
+    }
+  }
+
+  // 上传后后台逐张探测 Pages 何时生效，逐张点亮状态，直到全部上线或超时。
+  function trackDeployment(file) {
+    var path = file.path;
+    if (pagesReady[path] === true) return;
+    var tries = 0;
+    (function next() {
+      probeImage(displayUrl(path), 8000).then(function (ok) {
+        if (ok) {
+          pagesReady[path] = true;
+          probeDone[path] = true;
+          delete deployTimers[path];
+          updatePagesBadge();
+          setTileReady(path);
+        } else if (++tries < PROBE_MAX) {
+          deployTimers[path] = setTimeout(next, PROBE_INTERVAL);
+        } else {
+          probeDone[path] = true;
+          delete deployTimers[path];
+          updatePagesBadge();
+        }
+      });
+    })();
+  }
+
+  // 列表加载后对未探测过的图片批量探测一次，结果仅存内存，不做持久化。
+  function probeExisting(files) {
+    var targets = files.filter(function (f) { return !probeDone[f.path]; });
+    if (!targets.length) { updatePagesBadge(); return Promise.resolve(); }
+    return mapLimit(targets, 6, function (f) {
+      return probeImage(displayUrl(f.path), 6000).then(function (ok) {
+        pagesReady[f.path] = ok;
+        probeDone[f.path] = true;
+      });
+    }).then(function () { renderGallery(); updatePagesBadge(); });
   }
 
   function setStatus(msg, kind) {
@@ -302,14 +396,24 @@
       el.gallery.appendChild(p);
     }
     pageFiles.forEach(function (file) {
-      var url = displayUrl(file.path);
+      var url = smartUrl(file);
       var tile = document.createElement('div');
       tile.className = 'tile';
+      tile.dataset.path = file.path;
       var img = document.createElement('img');
       img.className = 'tile-thumb';
-      img.src = file.raw;
+      img.src = file.raw || rawUrl(file.path);
       img.alt = file.name;
       img.loading = 'lazy';
+      // raw 或 Pages 任一源失败时自动切到另一个，避免裂图。
+      img.addEventListener('error', function () {
+        var fallback = img.src.indexOf('raw.githubusercontent.com') !== -1
+          ? displayUrl(file.path) : (file.raw || rawUrl(file.path));
+        if (img.dataset.fallback !== fallback) {
+          img.dataset.fallback = fallback;
+          img.src = fallback;
+        }
+      });
       img.addEventListener('click', function () { openPreview(file); });
       var meta = document.createElement('div');
       meta.className = 'tile-meta';
@@ -319,7 +423,11 @@
       name.title = file.name;
       var sub = document.createElement('div');
       sub.className = 'tile-sub';
-      sub.textContent = formatSize(file.size);
+      var ready = document.createElement('span');
+      ready.className = 'tile-ready ' + (pagesReady[file.path] ? 'ready' : 'pending');
+      ready.textContent = pagesReady[file.path] ? '已上线' : '部署中';
+      sub.appendChild(ready);
+      sub.appendChild(document.createTextNode(' · ' + formatSize(file.size)));
       meta.appendChild(name);
       meta.appendChild(sub);
       var actions = document.createElement('div');
@@ -345,6 +453,7 @@
     el.pageInfo.textContent = state.page + ' / ' + totalPages;
     el.prevBtn.disabled = state.page <= 1;
     el.nextBtn.disabled = state.page >= totalPages;
+    updatePagesBadge();
   }
 
   function formatSize(bytes) {
@@ -407,17 +516,32 @@
 
   function openPreview(file) {
     el.previewName.textContent = file.name;
-    el.previewImg.src = file.raw;
-    var url = displayUrl(file.path);
+    var previewSrc = file.raw || rawUrl(file.path);
+    el.previewImg.onerror = function () {
+      el.previewImg.onerror = null;
+      el.previewImg.src = displayUrl(file.path);
+    };
+    el.previewImg.src = previewSrc;
+    var pagesLink = displayUrl(file.path);
+    var rawLink = file.raw || rawUrl(file.path);
+    var smart = smartUrl(file);
     el.previewLinks.innerHTML = '';
     [
-      ['图片链接（Pages）', url],
-      ['原始文件链接（raw）', rawUrl(file.path)],
-      ['Markdown', '![' + file.name + '](' + url + ')']
+      ['推荐链接（' + (pagesReady[file.path] ? 'Pages' : 'raw，Pages 部署中') + '）', smart, 'ready'],
+      ['Pages 链接' + (pagesReady[file.path] ? '（已上线）' : '（部署中，可能暂时 404）'), pagesLink, pagesReady[file.path] ? 'ready' : 'pending'],
+      ['原始文件链接（raw，立即可用）', rawLink, 'ready'],
+      ['Markdown', '![' + file.name + '](' + smart + ')', '']
     ].forEach(function (pair) {
       var label = document.createElement('div');
       label.className = 'link-label';
       label.textContent = pair[0];
+      if (pair[2]) {
+        var tag = document.createElement('span');
+        tag.className = 'link-tag ' + pair[2];
+        tag.textContent = pair[2] === 'ready' ? '可用' : '部署中';
+        label.appendChild(document.createTextNode(' '));
+        label.appendChild(tag);
+      }
       var row = document.createElement('div');
       row.className = 'link-row';
       var input = document.createElement('input');
@@ -482,6 +606,7 @@
       setStatus('图片库已更新，共 ' + files.length + ' 张。', 'ok');
       clearTimeout(refreshTimer);
       refreshTimer = setTimeout(resetRefreshBtn, 1800);
+      probeExisting(files); // 后台探测 Pages 生效状态，不阻塞刷新
       return files;
     }).catch(function (err) {
       btn.classList.remove('is-loading');
@@ -544,6 +669,8 @@
           state.files.push(item);
           succeeded++;
           renderGallery();
+          // 后台探测 Pages 何时生效，未上线前复制 raw，避免用户点到 404。
+          trackDeployment(item);
         });
       });
     }, function (done, total) {
@@ -557,7 +684,7 @@
           failNames.push(list[i].name + '（' + r.error.message + '）');
         }
       });
-      var msg = '上传完成，成功 ' + succeeded + ' 张，耗时已缩短。Pages 链接可能需要几十秒生效。';
+      var msg = '上传完成，成功 ' + succeeded + ' 张。raw 链接已可用，Pages 链接上线后会自动标记。';
       if (failed) msg += ' 失败 ' + failed + ' 张：' + failNames.join('；');
       setStatus(msg, failed ? 'err' : 'ok');
       // 后台静默刷新以对齐仓库真实状态（force 清缓存），不覆盖已显示的结果。
@@ -566,7 +693,7 @@
   }
 
   function init() {
-    ['repoBadge', 'dropzone', 'fileInput', 'progressWrap', 'progressBar', 'progressText',
+    ['repoBadge', 'pagesBadge', 'dropzone', 'fileInput', 'progressWrap', 'progressBar', 'progressText',
      'status', 'gallery', 'searchInput', 'refreshBtn', 'pagination', 'prevBtn', 'nextBtn', 'pageInfo',
      'previewModal', 'previewName', 'previewImg', 'previewLinks', 'formatSelect', 'formatHint'].forEach(function (id) { el[id] = $(id); });
 
@@ -618,7 +745,12 @@
   var boot = function () {
     init();
     if (location.search.indexOf('test=1') !== -1) {
-      window.__pushpicTest = { convertFile: convertFile, refresh: refresh, state: state, getFormat: getConvertFormat };
+      window.__pushpicTest = {
+        convertFile: convertFile, refresh: refresh, state: state, getFormat: getConvertFormat,
+        smartUrl: smartUrl, probeImage: probeImage, probeExisting: probeExisting,
+        displayUrl: displayUrl, rawUrl: rawUrl, pagesReady: pagesReady,
+        openPreview: openPreview, renderGallery: renderGallery, el: el
+      };
     }
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
