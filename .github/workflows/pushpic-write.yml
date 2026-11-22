@@ -23,7 +23,6 @@ jobs:
           # 写入令牌来自加密 Secret（libsodium sealed box 写入），服务端专用，浏览器不可见。
           github-token: ${{ secrets.PUSHPIC_TOKEN }}
           script: |
-            const core = require('@actions/core');
             const p = context.payload.client_payload || {};
             const type = context.payload.action; // dispatch event_type
 
