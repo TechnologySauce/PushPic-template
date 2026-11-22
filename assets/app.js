@@ -13,7 +13,8 @@
   var FORMAT_KEY = 'pushpic.convertFormat';
   var VECTORIZE_LIB = './vendor/imagetracer_v1.2.6.js';
 
-  var state = { files: [], page: 1, pageSize: 24, query: '', refreshing: false, lastRefresh: 0 };
+  var state = { files: [], page: 1, pageSize: 24, query: '', refreshing: false, lastRefresh: 0,
+    viewFiles: [], previewIndex: -1 };
   var el = {};
   var pendingRequests = {};  // 相同请求并发时复用同一个 Promise，避免重复打 API
   var etagCache = {};        // url -> { etag, data }，配合 If-None-Match 走 304 省流量
@@ -175,16 +176,56 @@
     })();
   }
 
-  // 列表加载后对未探测过的图片批量探测一次，结果仅存内存，不做持久化。
-  function probeExisting(files) {
-    var targets = files.filter(function (f) { return !probeDone[f.path]; });
-    if (!targets.length) { updatePagesBadge(); return Promise.resolve(); }
-    return mapLimit(targets, 6, function (f) {
+  // 只探测进入视口（含 160px 预取区）的图片，图库再大也不会一次性打爆请求。
+  var tileObserver = null;
+  function findFile(path) {
+    for (var i = 0; i < state.files.length; i++) {
+      if (state.files[i].path === path) return state.files[i];
+    }
+    return null;
+  }
+
+  function probeBatch(targets) {
+    if (!targets.length) return Promise.resolve();
+    return mapLimit(targets, 4, function (f) {
       return probeImage(displayUrl(f.path), 6000).then(function (ok) {
         pagesReady[f.path] = ok;
         probeDone[f.path] = true;
       });
     }).then(function () { renderGallery(); updatePagesBadge(); });
+  }
+
+  function ensureTileObserver() {
+    if (tileObserver) return tileObserver;
+    tileObserver = new IntersectionObserver(function (entries) {
+      var targets = [];
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        var path = entry.target.dataset.path;
+        tileObserver.unobserve(entry.target);
+        if (!path || probeDone[path]) return;
+        var file = findFile(path);
+        if (file) targets.push(file);
+      });
+      probeBatch(targets);
+    }, { rootMargin: '160px' });
+    return tileObserver;
+  }
+
+  function observeTiles() {
+    if (!('IntersectionObserver' in window)) return;
+    var observer = ensureTileObserver();
+    var tiles = el.gallery.querySelectorAll('.tile[data-path]');
+    for (var i = 0; i < tiles.length; i++) {
+      if (!probeDone[tiles[i].dataset.path]) observer.observe(tiles[i]);
+    }
+  }
+
+  // 列表加载后的入口：有 IntersectionObserver 时交给 observeTiles，老浏览器退化为只探测当前页。
+  function probeExisting(files) {
+    if ('IntersectionObserver' in window) { updatePagesBadge(); return Promise.resolve(); }
+    var targets = files.filter(function (f) { return !probeDone[f.path]; }).slice(0, state.pageSize);
+    return probeBatch(targets);
   }
 
   function setStatus(msg, kind) {
@@ -381,9 +422,19 @@
     });
   }
 
+  // 多关键词按空格拆分，需全部命中（AND），顺序与预览导航共用。
+  function filteredFiles() {
+    var words = state.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return state.files.slice();
+    return state.files.filter(function (f) {
+      var name = f.name.toLowerCase();
+      return words.every(function (w) { return name.indexOf(w) !== -1; });
+    });
+  }
+
   function renderGallery() {
-    var q = state.query.trim().toLowerCase();
-    var files = state.files.filter(function (f) { return !q || f.name.toLowerCase().indexOf(q) !== -1; });
+    var files = filteredFiles();
+    state.viewFiles = files;
     var totalPages = Math.max(1, Math.ceil(files.length / state.pageSize));
     state.page = Math.min(state.page, totalPages);
     var start = (state.page - 1) * state.pageSize;
@@ -392,7 +443,9 @@
     if (!pageFiles.length) {
       var p = document.createElement('p');
       p.className = 'empty';
-      p.textContent = state.files.length ? '没有匹配的文件。' : '仓库中还没有图片，上传一张试试吧。';
+      p.textContent = state.query.trim()
+        ? '没有匹配「' + state.query.trim() + '」的图片。'
+        : (state.files.length ? '没有匹配的文件。' : '仓库中还没有图片，上传一张试试吧。');
       el.gallery.appendChild(p);
     }
     pageFiles.forEach(function (file) {
@@ -453,6 +506,12 @@
     el.pageInfo.textContent = state.page + ' / ' + totalPages;
     el.prevBtn.disabled = state.page <= 1;
     el.nextBtn.disabled = state.page >= totalPages;
+    if (el.resultCount) {
+      el.resultCount.textContent = files.length === state.files.length
+        ? '共 ' + files.length + ' 张' : '匹配 ' + files.length + ' / ' + state.files.length + ' 张';
+    }
+    if (el.searchClear) el.searchClear.hidden = !state.query;
+    observeTiles();
     updatePagesBadge();
   }
 
@@ -515,7 +574,11 @@
   }
 
   function openPreview(file) {
-    el.previewName.textContent = file.name;
+    var view = state.viewFiles.length ? state.viewFiles : state.files;
+    var idx = -1;
+    for (var i = 0; i < view.length; i++) { if (view[i].path === file.path) { idx = i; break; } }
+    state.previewIndex = idx;
+    el.previewName.textContent = file.name + (idx >= 0 ? '　' + (idx + 1) + ' / ' + view.length : '');
     var previewSrc = file.raw || rawUrl(file.path);
     el.previewImg.onerror = function () {
       el.previewImg.onerror = null;
@@ -584,6 +647,7 @@
   function refresh(force) {
     var btn = el.refreshBtn;
     var label = btn.querySelector('.refresh-label');
+    var sub = btn.querySelector('.refresh-sub');
     if (state.refreshing) return state.refreshPromise;
     var now = Date.now();
     // 手动点击时 800ms 内的重复触发直接忽略，防止连点打爆 API。
@@ -594,6 +658,7 @@
     btn.classList.remove('is-done', 'is-error');
     btn.classList.add('is-loading');
     label.textContent = '刷新中';
+    if (sub) sub.textContent = '正在请求 GitHub…';
     btn.setAttribute('aria-label', '正在刷新图片库');
 
     state.refreshPromise = listImages(force).then(function (files) {
@@ -601,7 +666,9 @@
       renderGallery();
       btn.classList.remove('is-loading');
       btn.classList.add('is-done');
-      label.textContent = '已更新';
+      label.textContent = '已更新 ' + files.length + ' 张';
+      if (sub) sub.textContent = '刚刚同步完成';
+      if (el.refreshMeta) el.refreshMeta.textContent = '上次刷新 ' + clockTime();
       btn.setAttribute('aria-label', '刷新成功，共 ' + files.length + ' 张图片');
       setStatus('图片库已更新，共 ' + files.length + ' 张。', 'ok');
       clearTimeout(refreshTimer);
@@ -611,7 +678,9 @@
     }).catch(function (err) {
       btn.classList.remove('is-loading');
       btn.classList.add('is-error');
-      label.textContent = '重试';
+      label.textContent = '刷新失败';
+      if (sub) sub.textContent = '点击重试';
+      if (el.refreshMeta) el.refreshMeta.textContent = '上次尝试 ' + clockTime();
       btn.setAttribute('aria-label', '刷新失败，点击重试');
       setStatus('加载图片失败：' + err.message, 'err');
       clearTimeout(refreshTimer);
@@ -629,17 +698,37 @@
     return state.refreshPromise;
   }
 
+  function clockTime() {
+    var d = new Date();
+    function pad(n) { return ('0' + n).slice(-2); }
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
   function resetRefreshBtn() {
     var btn = el.refreshBtn;
     var label = btn.querySelector('.refresh-label');
+    var sub = btn.querySelector('.refresh-sub');
     btn.disabled = false;
     btn.classList.remove('is-loading', 'is-done', 'is-error');
     label.textContent = '刷新';
+    if (sub) sub.textContent = '点击同步';
     btn.setAttribute('aria-label', '刷新图片库');
   }
 
   function baseName(file) {
     return (file.name.replace(/\.[^.]+$/, '') || 'image');
+  }
+
+  // 用 Web Crypto 算内容摘要，同一批里完全相同的文件只上传一次。
+  function contentDigest(file) {
+    if (!window.crypto || !crypto.subtle || !file.arrayBuffer) return Promise.resolve('');
+    return file.arrayBuffer().then(function (buf) {
+      return crypto.subtle.digest('SHA-256', buf);
+    }).then(function (hash) {
+      var bytes = new Uint8Array(hash), hex = '';
+      for (var i = 0; i < bytes.length; i++) hex += ('0' + bytes[i].toString(16)).slice(-2);
+      return hex;
+    }).catch(function () { return ''; });
   }
 
   function uploadFiles(files) {
@@ -656,8 +745,23 @@
       list = list.filter(function (f) { return f.size <= MAX_SIZE; });
     }
     if (!list.length) return;
+    var dedupNote = '';
+    // 内容相同的文件只传一份，重复的写入名由 uniqueName 处理（内容不同仍会另存）。
+    return mapLimit(list, 8, contentDigest).then(function (digests) {
+      var seen = {};
+      var uploadList = list.filter(function (file, i) {
+        var d = digests[i];
+        if (!d || !seen[d]) { if (d) seen[d] = 1; return true; }
+        return false;
+      });
+      var dup = list.length - uploadList.length;
+      if (dup) dedupNote = '已跳过 ' + dup + ' 张内容重复的文件。';
+      return doUpload(uploadList, dedupNote);
+    });
+
+    function doUpload(list, dedupNote) {
     el.progressWrap.hidden = false;
-    setStatus('正在处理 0/' + list.length + ' …');
+    setStatus(dedupNote + '正在处理 0/' + list.length + ' …');
     var succeeded = 0, failed = 0;
     var failNames = [];
 
@@ -685,16 +789,18 @@
         }
       });
       var msg = '上传完成，成功 ' + succeeded + ' 张。raw 链接已可用，Pages 链接上线后会自动标记。';
+      if (dedupNote) msg = dedupNote + ' ' + msg;
       if (failed) msg += ' 失败 ' + failed + ' 张：' + failNames.join('；');
       setStatus(msg, failed ? 'err' : 'ok');
       // 后台静默刷新以对齐仓库真实状态（force 清缓存），不覆盖已显示的结果。
       return refresh(true).catch(function () {});
     });
+    }
   }
 
   function init() {
     ['repoBadge', 'pagesBadge', 'dropzone', 'fileInput', 'progressWrap', 'progressBar', 'progressText',
-     'status', 'gallery', 'searchInput', 'refreshBtn', 'pagination', 'prevBtn', 'nextBtn', 'pageInfo',
+     'status', 'gallery', 'searchInput', 'searchClear', 'resultCount', 'refreshBtn', 'refreshMeta', 'pagination', 'prevBtn', 'nextBtn', 'pageInfo',
      'previewModal', 'previewName', 'previewImg', 'previewLinks', 'formatSelect', 'formatHint'].forEach(function (id) { el[id] = $(id); });
 
     var savedFormat = getConvertFormat();
@@ -729,14 +835,33 @@
     el.dropzone.addEventListener('drop', function (e) { uploadFiles(e.dataTransfer.files); });
 
     el.refreshBtn.addEventListener('click', function () { refresh(true).catch(function () {}); });
-    el.searchInput.addEventListener('input', function () { state.query = el.searchInput.value; state.page = 1; renderGallery(); });
+    var searchTimer = null;
+    el.searchInput.addEventListener('input', function () {
+      var value = el.searchInput.value;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(function () {
+        state.query = value; state.page = 1; renderGallery();
+      }, 120);
+    });
+    el.searchClear.addEventListener('click', function () {
+      clearTimeout(searchTimer);
+      el.searchInput.value = ''; state.query = ''; state.page = 1; renderGallery(); el.searchInput.focus();
+    });
     el.prevBtn.addEventListener('click', function () { state.page--; renderGallery(); });
     el.nextBtn.addEventListener('click', function () { state.page++; renderGallery(); });
     document.querySelectorAll('[data-close-preview]').forEach(function (node) {
       node.addEventListener('click', function () { el.previewModal.hidden = true; });
     });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') el.previewModal.hidden = true;
+      if (el.previewModal.hidden) return;
+      if (e.key === 'Escape') { el.previewModal.hidden = true; return; }
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      var view = state.viewFiles.length ? state.viewFiles : state.files;
+      if (!view.length || state.previewIndex < 0) return;
+      e.preventDefault();
+      var step = e.key === 'ArrowRight' ? 1 : -1;
+      var next = (state.previewIndex + step + view.length) % view.length;
+      openPreview(view[next]);
     });
 
     refresh();
@@ -749,7 +874,8 @@
         convertFile: convertFile, refresh: refresh, state: state, getFormat: getConvertFormat,
         smartUrl: smartUrl, probeImage: probeImage, probeExisting: probeExisting,
         displayUrl: displayUrl, rawUrl: rawUrl, pagesReady: pagesReady,
-        openPreview: openPreview, renderGallery: renderGallery, el: el
+        openPreview: openPreview, renderGallery: renderGallery, el: el,
+        filteredFiles: filteredFiles, contentDigest: contentDigest, filteredCount: function () { return filteredFiles().length; }
       };
     }
   };
