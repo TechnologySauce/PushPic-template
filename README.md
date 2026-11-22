@@ -5,8 +5,8 @@
 ## 使用
 
 1. 打开站点：<https://technologysauce.github.io/PushPic/>
-2. 在上传卡片选择格式：保持原格式 / WebP / SVG
-3. 拖拽或点击上传图片（最多 20 张，单张 ≤ 50 MB）
+2. 在上传卡片选择格式：保持原格式 / WebP / AVIF / SVG
+3. 拖拽或点击上传图片（80+ 种格式，最多 20 张，单张 ≤ 50 MB）
 4. 在图片库中搜索、预览、复制链接或删除图片
 
 ## 链接与部署状态
@@ -32,16 +32,20 @@ Pages 链接生效后，复制到的短链即可用于外链。
 
 ### 支持的输入格式
 
-覆盖你列出的全部格式，共 30+ 种：
+覆盖 80+ 种扩展名，按类别归纳如下（含同一格式的多个别名扩展名）：
 
-- **常见位图**：bmp、jpg/jpeg、png、gif、webp、avif、apng、ico
-- **扫描/打印/交换**：tif/tiff、exif、fpx（TIFF 系用 `vendor/UTIF.js` 解码）、pcx、tga、pcd
-- **矢量/设计**：svg/svgz、eps、ai、cdr、dxf、wmf/emf、ufo
-- **相机 RAW**：raw、cr2、cr3、nef、arw、dng 等
+- **常见位图**：bmp、jpg/jpeg/jpe/jfif/pjpeg、png、gif、webp（含 animated）、avif、apng、ico
+- **TIFF 系与传真**：tif/tiff、exif、fpx、fax、g3、g4（TIFF 系用 `vendor/UTIF.js` 解码）
+- **JPEG 2000 / JPEG XL / 新一代压缩**：jp2、j2k、j2c、jpf、jpx、jpm、mj2、jxl、qoi、heif/heic、ljpeg、jls/jpegls、jxt/jpegxt、jxs/jpegxs
+- **矢量 / 设计 / 打印**：svg/svgz、psd、cdr、pcd、dxf、ufo、eps、ai、wmf/emf、pict/pict2
+- **相机 RAW**：raw、dng、cr2、cr3、nef、arw、orf、rw2、raf
+- **Netpbm 无损族**：pbm、pgm、ppm、pnm、pam
+- **动画**：mng、jng
+- **其它冷门 / 专有**：pcx、tga、xbm、xpm、wbm、plic、cpt、iif、pic、xv、xif、hrz、pal、icb、vda、vst、gro、pntg/pnt、mac
 
 转换全部在浏览器完成，不经过任何第三方服务端。TIFF 解码库 `vendor/UTIF.js`、矢量转换库 `vendor/imagetracer_v1.2.6.js`、AVIF 编码器 `vendor/jsquash2/` 均已随仓库提供，无需联网加载第三方资源。
 
-> 说明：浏览器对格式的解码能力由内核决定。位图（PNG/JPEG/GIF/BMP/WebP/AVIF/SVG/ICO）可直接由浏览器解码；TIFF/EXIF/FPX 由内置 UTIF.js 补充解码。psd/cdr/dxf/ufo/eps/ai/wmf/RAW 这类专有或矢量/相机格式，浏览器无法可靠解码，转换时会**原样保留上传**（不会生成损坏文件）；想要 WebP/AVIF 请先用专业软件另存为 PNG/JPEG。
+> 说明：图床的目标是"传上去不丢文件"。浏览器能解码的位图（PNG/JPEG/GIF/BMP/WebP/AVIF/SVG/ICO）可直接转 WebP/AVIF/SVG；TIFF/EXIF/FPX 由内置 UTIF.js 补充解码。JPEG2000/JXL/QOI/HEIC、相机 RAW、Adobe/Corel 专有格式、矢量设计、Netpbm 及老式格式，浏览器无法可靠解码，**选了转换也会原样保留上传**（不会生成损坏文件）。任何格式转换失败或"转后更大"时，一律自动回退原图。想要强制转成 WebP/AVIF，请先用专业软件另存为 PNG/JPEG。
 
 ## Logo
 
