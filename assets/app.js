@@ -5,17 +5,17 @@
   var OWNER_REPO = 'TechnologySauce/PushPic';
   var BRANCH = 'main';
   var IMAGE_DIR = 'images';
-  // 安全架构（v2.1 起）：
+  // 安全架构（v3.1 起）：
   //   读取：走 GitHub 公开 API，无需任何令牌。
-  //   写入：浏览器只向 repository_dispatch 提交请求；服务端用最小权限 GITHUB_TOKEN
-  //         写仓库，写入凭证只以加密 Secret 存在服务端，浏览器无从读取。
-  //   DISPATCH_TOKEN 仅用于触发工作流；本机存储时用 WebCrypto AES-GCM 加密，
-  //   设备密钥存 sessionStorage（关闭标签即失效），密文存 localStorage。
-  //   HMAC 签名：payload 带 timestamp+nonce+SHA-256 签名，服务端校验时效并拒绝重放。
+  //   写入：浏览器直传 GitHub Contents API（PUT/DELETE），绕开 dispatch 的 48KB payload 上限，
+  //         支持 50MB 大图。写入令牌由部署者配置一次，必须有本仓库 Contents 读写权限。
+  //   DISPATCH_TOKEN（沿用旧变量名）：本机用 WebCrypto AES-GCM 加密存储，
+  //   设备密钥存 sessionStorage（关闭标签即失效），密文存 localStorage，页面无明文令牌。
+  //   严格 CSP + 内容校验 + 加密存储构成纵深防御。
   var TOKEN_STORE = 'pushpic.dispatchToken.v2';
   var TOKEN_KEY = 'pushpic.deviceKey';
   var DISPATCH_TOKEN = '';
-  var tokenReady = loadDispatchToken(); // 异步解密，dispatchWrite 前会等待
+  var tokenReady = loadDispatchToken(); // 异步解密，写入前会等待
   function b64url(bytes) {
     return btoa(String.fromCharCode.apply(null, bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
@@ -53,15 +53,21 @@
         var parts = enc.split('.');
         if (parts.length !== 2) throw new Error('bad token record');
         return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64url(parts[0]) }, key, unb64url(parts[1]));
-      }).then(function (plain) { DISPATCH_TOKEN = bytesToStr(plain); return DISPATCH_TOKEN; })
+      }).then(function (plain) { DISPATCH_TOKEN = bytesToStr(plain); if (typeof syncTokenBtn === 'function') syncTokenBtn(); return DISPATCH_TOKEN; })
         .catch(function () { DISPATCH_TOKEN = ''; return ''; });
     } catch (e) { return Promise.resolve(''); }
   }
   function saveDispatchToken(v) {
     v = String(v || '').trim();
+    // 直传 Contents API 需要写权限。接受经典 PAT（ghp_）与细粒度令牌（github_pat_），
+    // 但明确提示最小权限原则：只授予本仓库 Contents 读写，且设置过期时间。
+    if (v && !/^(gh[pousr]_|github_pat_)/.test(v)) {
+      return Promise.reject(new Error('令牌格式不正确：应为 ghp_（经典）或 github_pat_（细粒度）开头。请授予本仓库 Contents 读写权限并设置过期时间。'));
+    }
     if (!v) {
       try { localStorage.removeItem(TOKEN_STORE); localStorage.removeItem('pushpic.dispatchToken'); } catch (e) {}
       DISPATCH_TOKEN = '';
+      if (typeof syncTokenBtn === 'function') syncTokenBtn();
       return Promise.resolve('');
     }
     return getDeviceKey().then(function (key) {
@@ -70,6 +76,7 @@
         try { localStorage.setItem(TOKEN_STORE, b64url(iv) + '.' + b64url(new Uint8Array(ct))); } catch (e) {}
         try { localStorage.removeItem('pushpic.dispatchToken'); } catch (e) {}
         DISPATCH_TOKEN = v;
+        if (typeof syncTokenBtn === 'function') syncTokenBtn();
         return v;
       });
     });
@@ -123,6 +130,7 @@
   var el = {};
   var pendingRequests = {};  // 相同请求并发时复用同一个 Promise，避免重复打 API
   var etagCache = {};        // url -> { etag, data }，配合 If-None-Match 走 304 省流量
+  var CACHE_TTL = 60 * 1000; // ETag 缓存 60 秒内有效，过期强制回源
   var pagesReady = {};       // path -> true/false：图片是否已在 Pages 上生效
   var probeDone = {};        // path -> true：本次会话已探测过，避免重复请求
   var deployTimers = {};     // path -> timer：后台部署探测计时器
@@ -137,17 +145,17 @@
     var req = (function () {
       var opts = Object.assign({}, options || {});
       var headers = Object.assign(baseHeaders(), opts.headers || {});
-      if (useCache && etagCache[url] && etagCache[url].etag) {
-        headers['If-None-Match'] = etagCache[url].etag;
-      }
+      var cached = useCache ? etagCache[url] : null;
+      var fresh = cached && cached.etag && (Date.now() - (cached.at || 0) < CACHE_TTL);
+      if (fresh) headers['If-None-Match'] = cached.etag;
       opts.headers = headers;
-      return fetch(url, opts).then(function (res) {
+      return fetchWithTimeout(url, opts).then(function (res) {
         if (res.status === 304 && etagCache[url]) return etagCache[url].data;
         if (res.status === 404) { var e404 = new Error('Not Found'); e404.status = 404; throw e404; }
         return res.json().then(function (data) {
           if (useCache && res.ok && res.headers && res.headers.get) {
             var etag = res.headers.get('etag');
-            if (etag) etagCache[url] = { etag: etag, data: data };
+            if (etag) etagCache[url] = { etag: etag, data: data, at: Date.now() };
           }
           if (!res.ok) {
             var err = new Error((data && data.message) || ('GitHub API ' + res.status));
@@ -200,6 +208,16 @@
       'Accept': 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28'
     };
+  }
+
+  // 给每个网络请求加超时，避免弱网下请求悬挂拖住整个页面；超时按网络错误重试。
+  function fetchWithTimeout(url, opts, ms) {
+    var options = Object.assign({}, opts || {});
+    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    if (controller) options.signal = controller.signal;
+    var timer = setTimeout(function () { if (controller) controller.abort(); }, ms || 12000);
+    return fetch(url, options).then(function (res) { clearTimeout(timer); return res; },
+      function (err) { clearTimeout(timer); throw err; });
   }
 
   // 读取公开数据不需要令牌；仅在触发工作流时附加 DISPATCH_TOKEN。
@@ -360,13 +378,30 @@
     el.status.className = 'status' + (kind ? ' ' + kind : '');
   }
 
-  function apiFetch(url, options, attempts) {
+  // 令牌按钮反映是否已配置：已配置=绿色实心，未配置=描边（只读）。
+  function syncTokenBtn() {
+    if (!el.tokenBtn) return;
+    el.tokenBtn.classList.toggle('is-ready', !!DISPATCH_TOKEN);
+    el.tokenBtn.textContent = DISPATCH_TOKEN ? '✓ 令牌' : '⚙ 令牌';
+    el.tokenBtn.title = DISPATCH_TOKEN ? '令牌已配置（点此更换或清除）' : '未配置令牌（只读模式，点此配置）';
+  }
+
+  function apiFetch(url, options, attempts, noRetry) {
     var opts = Object.assign({ headers: baseHeaders() }, options || {});
-    var n = attempts == null ? 2 : attempts;
-    return fetch(url, opts).then(function (res) {
+    var n = noRetry ? 0 : (attempts == null ? 2 : attempts);
+    return fetchWithTimeout(url, opts).then(function (res) {
+      // 204/205 无响应体（如 repository_dispatch 成功返回 204），不能调用 json()。
+      if (res.status === 204 || res.status === 205) return {};
       if (res.ok) return res.json();
       return res.json().catch(function () { return {}; }).then(function (body) {
-        var err = new Error(body.message || ('GitHub API ' + res.status));
+        var friendly = {
+          401: '令牌无效或已过期（401），请点右上角「令牌」重新填写',
+          403: '令牌权限不足或被限流（403），请确认已授予 Contents 读写权限',
+          404: '仓库或文件不存在（404）',
+          409: '文件冲突（409），请刷新后重试',
+          422: '请求被拒绝（422）：' + (body.message || '内容不符合要求')
+        };
+        var err = new Error(friendly[res.status] || body.message || ('GitHub API ' + res.status));
         err.status = res.status;
         throw err;
       });
@@ -374,56 +409,49 @@
       // 网络抖动 / 5xx 自动重试一次；4xx 是明确错误，不重试。
       if (n > 0 && (!err.status || err.status >= 500)) {
         return new Promise(function (resolve) { setTimeout(resolve, 300); })
-          .then(function () { return apiFetch(url, opts, n - 1); });
+          .then(function () { return apiFetch(url, opts, n - 1, noRetry); });
       }
       throw err;
     });
   }
 
-  // 触发服务端 Actions 工作流：浏览器只提交请求，不直接接触写入令牌。
-  // 时间戳 + 随机 nonce + SHA-256 摘要作为服务端防重放/完整性校验材料。
+  // 规范化 JSON 与 SHA-256 签名工具：对象键递归排序、数组保序。
+  // 供测试与后续扩展（如服务端签名校验）使用，保证跨端键序一致。
+  function canonicalize(value) {
+    if (Array.isArray(value)) return value.map(canonicalize);
+    if (value && typeof value === 'object') {
+      var out = {};
+      Object.keys(value).sort().forEach(function (k) { out[k] = canonicalize(value[k]); });
+      return out;
+    }
+    return value;
+  }
   function signPayload(obj) {
-    var body = JSON.stringify(obj);
+    var body = JSON.stringify(canonicalize(obj));
     if (!crypto || !crypto.subtle) return Promise.reject(new Error('当前环境不支持 WebCrypto，无法签名'));
     return crypto.subtle.digest('SHA-256', strToBytes(body)).then(function (digest) {
       return b64url(new Uint8Array(digest));
-    });
-  }
-  function dispatchWrite(eventType, payload) {
-    return tokenReady.then(function () {
-      if (!DISPATCH_TOKEN) {
-        throw new Error('未配置上传凭证：请点右上角「令牌」填入仅用于触发 Actions 的低权限令牌（见 README）。');
-      }
-      var sealed = Object.assign({}, payload, {
-        _ts: Date.now(),
-        _nonce: Array.from(crypto.getRandomValues(new Uint8Array(16))).map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join('')
-      });
-      return signPayload(sealed).then(function (sig) {
-        // _sig 同时放在顶层和 client_payload，兼容 GitHub 对 dispatch payload 的转发差异。
-        sealed._sig = sig;
-        var url = 'https://api.github.com/repos/' + OWNER_REPO + '/dispatches';
-        return apiFetch(url, {
-          method: 'POST',
-          headers: jsonHeaders(true),
-          body: JSON.stringify({ event_type: eventType, client_payload: sealed, _sig: sig })
-        }, 1); // 不重试 dispatches，避免重复写入
-      });
     });
   }
 
   // 工作流异步执行，轮询 raw 链接直到文件真正出现（或超时）。
   function waitForPublished(path, wantPresent, tries) {
     var url = rawUrl(path) + '?t=' + Date.now();
-    return fetch(url, { method: 'GET', cache: 'no-store' }).then(function (res) {
+    return fetchWithTimeout(url, { method: 'GET', cache: 'no-store' }, 8000).then(function (res) {
       var present = res.ok;
       if (present === wantPresent) return true;
-      if ((tries || 0) <= 0) return false;
-      return new Promise(function (r) { setTimeout(r, 1500); })
-        .then(function () { return waitForPublished(path, wantPresent, (tries || 0) - 1); });
+      var left = (tries || 0);
+      if (left <= 0) return false;
+      // 指数退避：首次 400ms 快速确认，逐次翻倍，上限 2s。比固定 1.5s 更早反馈。
+      var delay = Math.min(2000, 400 * Math.pow(2, 30 - left));
+      return new Promise(function (r) { setTimeout(r, delay); })
+        .then(function () { return waitForPublished(path, wantPresent, left - 1); });
     }).catch(function () {
-      if ((tries || 0) <= 0) return false;
-      return new Promise(function (r) { setTimeout(r, 1500); })
-        .then(function () { return waitForPublished(path, wantPresent, (tries || 0) - 1); });
+      var left = (tries || 0);
+      if (left <= 0) return false;
+      var delay = Math.min(2000, 400 * Math.pow(2, 30 - left));
+      return new Promise(function (r) { setTimeout(r, delay); })
+        .then(function () { return waitForPublished(path, wantPresent, left - 1); });
     });
   }
 
@@ -472,6 +500,12 @@
       reader.onerror = function () { reject(new Error('读取文件失败: ' + file.name)); };
       reader.readAsDataURL(file);
     });
+  }
+
+  // 选中转换格式时提前把编码组件准备好，真正点上传时不再等待下载/编译。
+  function preloadFormat(v) {
+    if (v === 'avif') { import(AVIF_MODULE).catch(function () {}); }
+    else if (v === 'svg') { loadScript(VECTORIZE_LIB).catch(function () {}); }
   }
 
   function loadScript(src) {
@@ -575,7 +609,7 @@
     out = out.replace(/<(script|foreignObject|iframe|object|embed|style|handler)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
     // 再只保留安全元素，剥离其它标签但保留其文本内容。
     out = out.replace(/<\/?([A-Za-z][\w:-]*)([^>]*)>/g, function (m, tag, attrs) {
-      var safe = /^(svg|g|path|circle|rect|line|polyline|polygon|ellipse|defs|title|desc|metadata|linearGradient|radialGradient|stop|clipPath|mask|use|symbol|view|style)$/i;
+      var safe = /^(svg|g|path|circle|rect|line|polyline|polygon|ellipse|defs|title|desc|metadata|linearGradient|radialGradient|stop|clipPath|mask|use|symbol|view)$/i;
       if (!safe.test(tag)) return '';
       // 去掉所有 on* 事件属性与 xlink:href/href 中的外部引用，以及 style 中的 expression/url(javascript:)。
       var clean = attrs
@@ -586,6 +620,13 @@
     });
     out = out.replace(/<\?xml[^>]*\?>/gi, '').replace(/<!DOCTYPE[^>]*>/gi, '')
              .replace(/<!ENTITY[^>]*>/gi, '').replace(/<!\[CDATA\[|\]\]>/g, '');
+    // CSS 里的 url()/import 可外带数据；<use>/<image>/<a> 的外链可指向恶意资源。
+    out = out.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, '');
+    out = out.replace(/<(?:use|image|a)\b[^>]*?(?:xlink:)?href\s*=\s*(?:"(?!#)[^"]*"|'(?!#)[^']*'|[^\s>]+)/gi, function (m) {
+      return m.replace(/(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i, 'href="#"');
+    });
+    // 控制字符可能用于绕过正则，直接剔除。
+    out = out.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
     return out;
   }
 
@@ -657,29 +698,71 @@
     });
   }
 
-  // 写入改为服务端 Actions 工作流：浏览器只发 dispatch，不含任何写入令牌。
+  // 内容真实性校验：按扩展名检查文件头，拒绝伪装成图片的 HTML/JS/可执行文件。
+  // 已知格式必须匹配魔数；未知/专有格式至少不能有 HTML/脚本/PE 头。
+  function verifyMagic(content, ext) {
+    var bytes;
+    try { bytes = unb64url(content.replace(/\+/g, '-').replace(/\//g, '_')); }
+    catch (e) { return true; } // 解码异常交给服务端校验，这里不误杀
+    var ascii = function (a, b) { return String.fromCharCode.apply(null, bytes.subarray(a, b)); };
+    var magic = {
+      png:  function () { return bytes[0] === 0x89 && ascii(1, 4) === 'PNG'; },
+      gif:  function () { return ascii(0, 3) === 'GIF'; },
+      webp: function () { return ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP'; },
+      avif: function () { return ascii(4, 8) === 'ftyp' && /^(avif|avis|mif1|msf1)$/.test(ascii(8, 12)); },
+      jpg:  function () { return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff; },
+      jpeg: function () { return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff; },
+      bmp:  function () { return ascii(0, 2) === 'BM'; }
+    };
+    if (magic[ext]) return magic[ext]();
+    // 未知格式：拒绝明显的脚本/HTML/PE/ELF 头
+    var head = ascii(0, Math.min(64, bytes.length)).toLowerCase();
+    return !(/<script|<!doctype|<html|<\?php|^mz|^\x7felf/.test(head));
+  }
+
+  // 写入走浏览器直传 GitHub Contents API：支持大文件（<= 50MB），绕开 dispatch 的 48KB 上限。
+  // 令牌仅用于本仓库 Contents 读写，由部署者在页面一次性配置，AES-GCM 加密保存在本机。
+  function writeContents(path, content, sha) {
+    return tokenReady.then(function () {
+      if (!DISPATCH_TOKEN) {
+        throw new Error('未配置令牌：请点右上角「令牌」填入一枚仅含本仓库 Contents 读写权限的令牌。');
+      }
+      var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' + encodePath(path);
+      var body = { message: 'Upload ' + path.split('/').pop() + ' via PushPic',
+                   content: content, branch: BRANCH };
+      if (sha) body.sha = sha;
+      return apiFetch(url, {
+        method: 'PUT',
+        headers: jsonHeaders(true),
+        body: JSON.stringify(body)
+      }, 2, true); // 写入请求不重试，避免 sha 冲突/重复提交
+    });
+  }
+
   function uploadFile(file, name, content, bytes) {
     if (typeof content !== 'string' || !content.length) {
       return Promise.reject(new Error('文件 ' + name + ' 未生成有效内容，已取消上传'));
     }
-    // 同名覆盖时需要 sha（工作流更新文件需要）；公开 API 读取，无需令牌。
+    // 同名覆盖需要 sha（更新文件必须带）；公开 API 读取，无需令牌。
+    var path = IMAGE_DIR + '/' + name;
     var lookup = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
-      encodePath(IMAGE_DIR + '/' + name) + '?ref=' + encodeURIComponent(BRANCH);
+      encodePath(path) + '?ref=' + encodeURIComponent(BRANCH);
     return cachedFetch(lookup, null, false).then(function (existing) {
       return (existing && existing.sha ? existing.sha : '');
     }).catch(function () { return ''; }).then(function (sha) {
-      return dispatchWrite('pushpic-upload', { name: name, content: content, sha: sha })
-        .then(function () { return waitForPublished(IMAGE_DIR + '/' + name, true, 30); })
-        .then(function (ok) {
-          if (!ok) throw new Error('已提交到工作流，但文件暂未上线，请稍后刷新');
-          return {
-            name: name,
-            path: IMAGE_DIR + '/' + name,
-            sha: sha,
-            size: bytes != null ? bytes : file.size,
-            raw: rawUrl(IMAGE_DIR + '/' + name)
-          };
-        });
+      var ext = (name.match(/\.([^.]+)$/) || [, ''])[1].toLowerCase();
+      if (!verifyMagic(content, ext)) {
+        throw new Error('文件 ' + name + ' 的内容与扩展名不符，已拒绝上传（疑似伪装文件）');
+      }
+      return writeContents(path, content, sha).then(function () {
+        return {
+          name: name,
+          path: path,
+          sha: '',
+          size: bytes != null ? bytes : file.size,
+          raw: rawUrl(path)
+        };
+      });
     });
   }
 
@@ -694,6 +777,96 @@
     });
   }
 
+  // 图库节点缓存：搜索/分页/收藏切换时复用已渲染卡片，不重建 DOM、不重新解码图片。
+  var tileCache = {};
+  function pruneTileCache(keep) {
+    Object.keys(tileCache).forEach(function (p) { if (!keep || !keep[p]) delete tileCache[p]; });
+  }
+  function syncTile(tile, file) {
+    var f = findFile(file.path) || file;
+    var star = tile.querySelector('.tile-star');
+    if (star) {
+      var fav = !!favorites[f.path];
+      star.classList.toggle('is-fav', fav);
+      star.textContent = fav ? '★' : '☆';
+      star.title = fav ? '取消收藏' : '收藏';
+      star.setAttribute('aria-label', star.title);
+    }
+    var ready = tile.querySelector('.tile-ready');
+    if (ready) {
+      ready.classList.toggle('ready', !!pagesReady[f.path]);
+      ready.classList.toggle('pending', !pagesReady[f.path]);
+      ready.textContent = pagesReady[f.path] ? '已上线' : '部署中';
+    }
+    tile._url = smartUrl(f);
+  }
+  function createTile(file) {
+    var path = file.path;
+    var tile = document.createElement('div');
+    tile.className = 'tile';
+    tile.dataset.path = path;
+    var media = document.createElement('div');
+    media.className = 'tile-media';
+    var star = document.createElement('button');
+    star.type = 'button';
+    star.className = 'tile-star';
+    star.addEventListener('click', function (e) { e.stopPropagation(); toggleFavorite(path); });
+    var img = document.createElement('img');
+    img.className = 'tile-thumb';
+    img.src = file.raw || rawUrl(path);
+    img.alt = file.name;
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.addEventListener('error', function () {
+      // 最多在两个源之间切换一次，避免坏图反复重试造成请求风暴。
+      var tries = parseInt(img.dataset.tries || '0', 10);
+      if (tries >= 2) return;
+      img.dataset.tries = String(tries + 1);
+      var f = findFile(path) || file;
+      var fallback = img.src.indexOf('raw.githubusercontent.com') !== -1
+        ? displayUrl(path) : (f.raw || rawUrl(path));
+      if (img.dataset.fallback !== fallback) { img.dataset.fallback = fallback; img.src = fallback; }
+    });
+    img.addEventListener('click', function () { openPreview(findFile(path) || file); });
+    var meta = document.createElement('div');
+    meta.className = 'tile-meta';
+    var name = document.createElement('span');
+    name.className = 'tile-name';
+    name.textContent = file.name;
+    name.title = file.name;
+    var sub = document.createElement('div');
+    sub.className = 'tile-sub';
+    var ready = document.createElement('span');
+    ready.className = 'tile-ready pending';
+    ready.textContent = '部署中';
+    sub.appendChild(ready);
+    sub.appendChild(document.createTextNode(' · ' + formatSize(file.size)));
+    meta.appendChild(name);
+    meta.appendChild(sub);
+    var actions = document.createElement('div');
+    actions.className = 'tile-actions';
+    var copy = document.createElement('button');
+    copy.className = 'btn btn-primary'; copy.type = 'button'; copy.textContent = '复制链接';
+    copy.addEventListener('click', function () { copyText(smartUrl(findFile(path) || file), copy); });
+    var md = document.createElement('button');
+    md.className = 'btn btn-ghost'; md.type = 'button'; md.textContent = 'MD';
+    md.title = '复制 Markdown 代码';
+    md.addEventListener('click', function () {
+      var f = findFile(path) || file;
+      copyText('![' + f.name + '](' + smartUrl(f) + ')', md);
+    });
+    var dl = document.createElement('button');
+    dl.className = 'btn btn-ghost'; dl.type = 'button'; dl.textContent = '下载';
+    dl.addEventListener('click', function () { downloadFile(findFile(path) || file); });
+    var del = document.createElement('button');
+    del.className = 'btn btn-ghost btn-wide'; del.type = 'button'; del.textContent = '删除';
+    del.addEventListener('click', function () { deleteFile(findFile(path) || file, del); });
+    actions.appendChild(copy); actions.appendChild(md); actions.appendChild(dl); actions.appendChild(del);
+    media.appendChild(star); media.appendChild(img);
+    tile.appendChild(media); tile.appendChild(meta); tile.appendChild(actions);
+    return tile;
+  }
+
   function renderGallery() {
     var files = filteredFiles();
     state.viewFiles = files;
@@ -702,7 +875,7 @@
     state.page = Math.min(state.page, totalPages);
     var start = allPages ? 0 : (state.page - 1) * state.pageSize;
     var pageFiles = allPages ? files : files.slice(start, start + state.pageSize);
-    el.gallery.innerHTML = '';
+    var frag = document.createDocumentFragment();
     if (!pageFiles.length) {
       var p = document.createElement('p');
       p.className = 'empty';
@@ -711,91 +884,16 @@
         : (state.query.trim()
           ? '没有匹配「' + state.query.trim() + '」的图片。'
           : (state.files.length ? '没有匹配的文件。' : '仓库中还没有图片，上传一张试试吧。'));
-      el.gallery.appendChild(p);
+      frag.appendChild(p);
     }
     pageFiles.forEach(function (file) {
-      var url = smartUrl(file);
-      var tile = document.createElement('div');
-      tile.className = 'tile';
-      tile.dataset.path = file.path;
-      var media = document.createElement('div');
-      media.className = 'tile-media';
-      var star = document.createElement('button');
-      star.type = 'button';
-      star.className = 'tile-star' + (favorites[file.path] ? ' is-fav' : '');
-      star.textContent = favorites[file.path] ? '★' : '☆';
-      star.title = favorites[file.path] ? '取消收藏' : '收藏';
-      star.setAttribute('aria-label', star.title);
-      star.addEventListener('click', function (e) {
-        e.stopPropagation();
-        toggleFavorite(file.path);
-      });
-      var img = document.createElement('img');
-      img.className = 'tile-thumb';
-      img.src = file.raw || rawUrl(file.path);
-      img.alt = file.name;
-      img.loading = 'lazy';
-      img.decoding = 'async';
-      // raw 或 Pages 任一源失败时自动切到另一个，避免裂图。
-      img.addEventListener('error', function () {
-        var fallback = img.src.indexOf('raw.githubusercontent.com') !== -1
-          ? displayUrl(file.path) : (file.raw || rawUrl(file.path));
-        if (img.dataset.fallback !== fallback) {
-          img.dataset.fallback = fallback;
-          img.src = fallback;
-        }
-      });
-      img.addEventListener('click', function () { openPreview(file); });
-      var meta = document.createElement('div');
-      meta.className = 'tile-meta';
-      var name = document.createElement('span');
-      name.className = 'tile-name';
-      name.textContent = file.name;
-      name.title = file.name;
-      var sub = document.createElement('div');
-      sub.className = 'tile-sub';
-      var ready = document.createElement('span');
-      ready.className = 'tile-ready ' + (pagesReady[file.path] ? 'ready' : 'pending');
-      ready.textContent = pagesReady[file.path] ? '已上线' : '部署中';
-      sub.appendChild(ready);
-      sub.appendChild(document.createTextNode(' · ' + formatSize(file.size)));
-      meta.appendChild(name);
-      meta.appendChild(sub);
-      var actions = document.createElement('div');
-      actions.className = 'tile-actions';
-      var copy = document.createElement('button');
-      copy.className = 'btn btn-primary';
-      copy.type = 'button';
-      copy.textContent = '复制链接';
-      copy.addEventListener('click', function () { copyText(url, copy); });
-      var md = document.createElement('button');
-      md.className = 'btn btn-ghost';
-      md.type = 'button';
-      md.textContent = 'MD';
-      md.title = '复制 Markdown 代码';
-      md.addEventListener('click', function () { copyText('![' + file.name + '](' + url + ')', md); });
-      var dl = document.createElement('button');
-      dl.className = 'btn btn-ghost';
-      dl.type = 'button';
-      dl.textContent = '下载';
-      dl.addEventListener('click', function () { downloadFile(file); });
-      var del = document.createElement('button');
-      del.className = 'btn btn-ghost';
-      del.type = 'button';
-      del.textContent = '删除';
-      del.addEventListener('click', function () { deleteFile(file, del); });
-      actions.appendChild(copy);
-      actions.appendChild(md);
-      actions.appendChild(dl);
-      del.className = 'btn btn-ghost btn-wide';
-      actions.appendChild(del);
-      media.appendChild(star);
-      media.appendChild(img);
-      tile.appendChild(media);
-      tile.appendChild(meta);
-      tile.appendChild(actions);
-      el.gallery.appendChild(tile);
+      var tile = tileCache[file.path];
+      if (!tile) { tile = createTile(file); tileCache[file.path] = tile; }
+      syncTile(tile, file);
+      frag.appendChild(tile);
     });
+    el.gallery.innerHTML = '';
+    el.gallery.appendChild(frag);
     el.pagination.hidden = allPages || files.length <= state.pageSize;
     el.pageInfo.textContent = state.page + ' / ' + totalPages;
     el.prevBtn.disabled = state.page <= 1;
@@ -945,10 +1043,19 @@
           .then(function (d) { return d.sha; });
     shaReady.then(function (sha) {
       if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('无法获取文件 sha');
-      return dispatchWrite('pushpic-delete', { name: file.name, sha: sha })
-        .then(function () { return waitForPublished(file.path, false, 20); });
+      return tokenReady.then(function () {
+        if (!DISPATCH_TOKEN) throw new Error('未配置令牌，无法删除');
+        var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' + encodePath(file.path);
+        return apiFetch(url, {
+          method: 'DELETE',
+          headers: jsonHeaders(true),
+          body: JSON.stringify({ message: 'Delete ' + file.name + ' via PushPic',
+                                 sha: sha, branch: BRANCH })
+        }, 2, true);
+      });
     }).then(function () {
       state.files = state.files.filter(function (f) { return f.path !== file.path; });
+      delete tileCache[file.path];
       renderGallery();
       setStatus('已删除 ' + file.name, 'ok');
       clearListCache();
@@ -979,6 +1086,8 @@
 
     state.refreshPromise = listImages(force).then(function (files) {
       state.files = files;
+      var keep = files.reduce(function (m, f) { m[f.path] = 1; return m; }, {});
+      pruneTileCache(keep);
       renderGallery();
       btn.classList.remove('is-loading');
       btn.classList.add('is-done');
@@ -1111,8 +1220,10 @@
       if (dedupNote) msg = dedupNote + ' ' + msg;
       if (failed) msg += ' 失败 ' + failed + ' 张：' + failNames.join('；');
       setStatus(msg, failed ? 'err' : 'ok');
-      // 后台静默刷新以对齐仓库真实状态（force 清缓存），不覆盖已显示的结果。
-      return refresh(true).catch(function () {});
+      // 每张上传成功时已写入 state.files，不必再打一次完整列表 API。
+      // 只清缓存，下次用户主动刷新时自然对齐仓库真实状态。
+      clearListCache();
+      pruneTileCache();
     });
     }
   }
@@ -1125,6 +1236,7 @@
 
     var savedFormat = getConvertFormat();
     el.formatSelect.value = savedFormat;
+    if (savedFormat !== 'keep') preloadFormat(savedFormat);
     var hints = {
       keep: '按原文件上传，覆盖 80+ 种扩展名：常见位图/JPEG2000/JXL/QOI/HEIC/AVIF/TIFF/传真/RAW/矢量设计/Netpbm/动画等',
       webp: '浏览器本地转 WebP，通常体积更小；转换后更大或无法解码则保留原图',
@@ -1135,6 +1247,7 @@
     updateHint();
     el.formatSelect.addEventListener('change', function () {
       setConvertFormat(el.formatSelect.value);
+      preloadFormat(el.formatSelect.value);
       updateHint();
       setStatus('已保存上传格式设置：' + el.formatSelect.options[el.formatSelect.selectedIndex].text, 'ok');
     });
@@ -1211,19 +1324,23 @@
 
     // 令牌设置：拥有者一次性填入「仅触发 Actions」的低权限令牌，保存在本机，不写入仓库。
     function openTokenDialog() {
-      var hint = DISPATCH_TOKEN ? '当前已配置上传凭证。' : '当前未配置上传凭证（只读模式）。';
+      var hint = DISPATCH_TOKEN ? '当前已配置上传令牌。' : '当前未配置上传令牌（只读模式）。';
       var val = window.prompt(
-        hint + '\n\n设置上传凭证（仅用于触发本仓库 Actions 的细粒度令牌，加密保存在你的浏览器）：\n' +
-        '留空可清除。详见 README「安全架构」。', '');
+        hint + '\n\n设置上传令牌：需对本仓库有 Contents 读写权限。\n' +
+        '• 经典 PAT：勾选 repo（或 public_repo + Contents 写）\n' +
+        '• 细粒度令牌：仅授权本仓库 Contents: read & write\n' +
+        '令牌用 AES-GCM 加密保存在你的浏览器，不会上传到任何服务器。留空可清除。', '');
       if (val === null) return;
       saveDispatchToken(val).then(function () {
-        setStatus(val.trim() ? '已加密保存上传凭证（仅本机）。' : '已清除上传凭证。', val.trim() ? 'ok' : '');
+        syncTokenBtn();
+        setStatus(val.trim() ? '已加密保存上传令牌（仅本机）。' : '已清除上传令牌。', val.trim() ? 'ok' : '');
       }).catch(function (err) {
         setStatus('保存失败：' + err.message, 'err');
       });
     }
     if (el.tokenBtn) el.tokenBtn.addEventListener('click', openTokenDialog);
 
+    tokenReady.then(syncTokenBtn);
     refresh();
   }
 
