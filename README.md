@@ -76,6 +76,8 @@ python3 tools/gen_logo.py
 - **批量上传去重**：上传前用 SHA-256 计算内容摘要，同一批里内容完全相同的文件只上传一次。
 - **批量上传**：最多 4 张并发处理，转换与上传重叠；每张上传成功后立即出现在图片库，不必等整批完成。
 - **刷新按钮**：SVG 环形进度 + 状态色 + 主副标题（刷新中 → 已更新 x 张 / 刷新失败·点击重试），顶部显示上次刷新时间；800ms 内连点自动忽略，避免重复打 API。
+- **首屏提速**：`preconnect` 预连 GitHub API 与 raw 图片源，减少首次请求握手延迟；令牌解密与图片库加载并行，读取不被 WebCrypto 阻塞。
+- **渲染提速**：图库卡片启用 `content-visibility: auto`，屏外卡片跳过布局/绘制，长列表滚动更流畅；缩略图异步解码（`decoding="async"`）。
 
 ## 链接
 
@@ -89,7 +91,7 @@ python3 tools/gen_logo.py
 **写入令牌不再出现在浏览器，也不在仓库前端文件里。** 这是与旧版最本质的区别。v2.1 在此之上做了纵深加固。
 
 - **读取**：图片库列表走 GitHub 公开 API，任何人都能看，无需令牌。
-- **写入**：浏览器只向 `repository_dispatch` 提交上传/删除请求；服务端 GitHub Actions 工作流用 **最小权限 `GITHUB_TOKEN`（仅 `contents: write`，按运行自动签发、用完即失效）** 写仓库。不再依赖可泄露的高权限 PAT；如需覆盖，可设置加密 Secret `PUSHPIC_TOKEN`。
+- **写入**：浏览器只向 `repository_dispatch` 提交上传/删除请求；服务端 GitHub Actions 工作流用 **最小权限 `GITHUB_TOKEN`（仅 `contents: write`，按运行自动签发、用完即失效）** 写仓库。彻底不再读取任何长期高权限 PAT——这是本轮相对旧版的关键收紧。
 - **防重放与完整性**：每次 dispatch 带毫秒时间戳 + 16 字节随机 nonce + SHA-256 摘要，服务端校验 5 分钟时效、用恒定时间比较拒绝篡改与重放。
 - **内容校验**：服务端除文件名/扩展名白名单与大小上限外，还校验 base64 解码后的 **magic bytes**（PNG/JPEG/GIF/WebP/AVIF/BMP），拒绝伪装成图片的 HTML/JS；SVG/SVGZ 解包后过滤 `<script>`、DOCTYPE/ENTITY、事件属性与外部引用。
 - **浏览器令牌加密存储**：「触发令牌」用 WebCrypto **AES-256-GCM** 加密后存 localStorage，密钥存 sessionStorage（关闭标签即失效），页面不再有明文令牌。
@@ -101,9 +103,8 @@ python3 tools/gen_logo.py
 
 公开仓库/docs 里的令牌仅用于演示，请在自己的仓库按下面步骤配置：
 
-1. （可选）在 GitHub 仓库 **Settings → Secrets and variables → Actions** 新建 Secret：
-   - `PUSHPIC_TOKEN`：仅在需要覆盖默认最小权限 `GITHUB_TOKEN` 时才配置；一般无需配置。
-2. 用随仓库提供的脚本，把令牌**加密后**写入 Secrets（明文不落盘、不进 Git 历史）：
+1. 写入凭证无需手动配置：工作流使用 GitHub 自动签发的最小权限 `GITHUB_TOKEN`。若从旧版迁移，建议删除仓库里的 `PUSHPIC_TOKEN` Secret（不再被读取）。
+2. 若要把令牌**加密后**写入 Secrets（明文不落盘、不进 Git 历史，供其它用途），可用随仓库提供的脚本：
 
    ```bash
    pip install pynacl
