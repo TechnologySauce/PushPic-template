@@ -10,7 +10,7 @@
   <link rel="icon" type="image/x-icon" href="./assets/favicon.ico?v=3a17c9d1" />
   <link rel="apple-touch-icon" href="./assets/img/logo-180.png?v=2f5c81a4" />
   <title>PushPic · 开箱即用图床</title>
-  <link rel="stylesheet" href="./assets/style.css?v=b73d5e18" />
+  <link rel="stylesheet" href="./assets/style.css?v=c41e8a72" />
 </head>
 <body>
   <header class="topbar">
@@ -31,13 +31,14 @@
     <section class="card upload-card">
       <div class="card-head">
         <h2>上传图片</h2>
-        <span class="hint">支持拖拽 · 最多 20 张 · 单张 ≤ 50 MB</span>
+        <span class="hint">支持 30+ 种格式 · 拖拽上传 · 最多 20 张 · 单张 ≤ 50 MB</span>
       </div>
       <div class="convert-bar">
         <label for="formatSelect">上传时自动转换为</label>
         <select id="formatSelect" class="select">
           <option value="keep" selected>保持原格式</option>
           <option value="webp">WebP（推荐，体积更小）</option>
+          <option value="avif">AVIF（更高压缩率）</option>
           <option value="svg">SVG（矢量轮廓，适合简单图形）</option>
         </select>
         <span id="formatHint" class="convert-hint">设置自动保存在本机浏览器，下次打开仍生效</span>
@@ -46,7 +47,7 @@
         <div class="dropzone-icon">＋</div>
         <p class="dropzone-title">拖拽图片到这里，或点击选择文件</p>
         <p class="dropzone-sub">图片会转换后直接上传到本仓库的 <code>images/</code> 目录，无需配置</p>
-        <input id="fileInput" type="file" accept="image/*" multiple hidden />
+        <input id="fileInput" type="file" accept=".bmp,.jpg,.jpeg,.png,.tif,.tiff,.gif,.pcx,.tga,.exif,.fpx,.svg,.svgz,.psd,.cdr,.pcd,.dxf,.ufo,.eps,.ai,.raw,.cr2,.cr3,.nef,.arw,.dng,.wmf,.emf,.webp,.avif,.apng,.heic,.heif,.ico,image/*" multiple hidden />
       </div>
       <div id="progressWrap" class="progress-wrap" hidden>
         <div class="progress-bar"><div id="progressBar" class="progress-fill"></div></div>
@@ -97,6 +98,6 @@
     </div>
   </div>
 
-  <script src="./assets/app.js?v=9f2c41ab"></script>
+  <script src="./assets/app.js?v=d5e4b391"></script>
 </body>
 </html>
