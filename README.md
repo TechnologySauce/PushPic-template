@@ -78,6 +78,10 @@ python3 tools/gen_logo.py
 - **刷新按钮**：SVG 环形进度 + 状态色 + 主副标题（刷新中 → 已更新 x 张 / 刷新失败·点击重试），顶部显示上次刷新时间；800ms 内连点自动忽略，避免重复打 API。
 - **首屏提速**：`preconnect` 预连 GitHub API 与 raw 图片源，减少首次请求握手延迟；令牌解密与图片库加载并行，读取不被 WebCrypto 阻塞。
 - **渲染提速**：图库卡片启用 `content-visibility: auto`，屏外卡片跳过布局/绘制，长列表滚动更流畅；缩略图异步解码（`decoding="async"`）。
+- **网络超时保护**：所有 GitHub API / raw 请求加超时与 AbortController，弱网下不再悬挂拖住页面。
+- **图库 DOM 复用**：搜索、筛选、分页时复用已渲染卡片节点并一次性插入文档片段，避免反复重建 DOM 和重新解码图片。
+- **上传免重复刷新**：每张上传成功后直接写入本地图片库，不再额外打一次完整列表 API。
+- **转换组件预加载**：选中 WebP/AVIF/SVG 格式时提前加载编码组件，点上传时不再等待下载/编译。
 
 ## 链接
 
@@ -86,37 +90,30 @@ python3 tools/gen_logo.py
 
 > 上传后 raw 链接立即可用；Pages 链接可能需要几十秒才会生效。
 
-## 安全架构（v2.1 起）
+## 安全架构（v3.1 起）
 
-**写入令牌不再出现在浏览器，也不在仓库前端文件里。** 这是与旧版最本质的区别。v2.1 在此之上做了纵深加固。
+先说实话：**纯静态 GitHub Pages 图床没有后端，「免配置」与「浏览器零令牌」无法同时成立。** 要写入仓库，浏览器必须持有令牌。v3.1 的设计是在这个前提下，把令牌暴露面和攻击面压到最小。
 
 - **读取**：图片库列表走 GitHub 公开 API，任何人都能看，无需令牌。
-- **写入**：浏览器只向 `repository_dispatch` 提交上传/删除请求；服务端 GitHub Actions 工作流用 **最小权限 `GITHUB_TOKEN`（仅 `contents: write`，按运行自动签发、用完即失效）** 写仓库。彻底不再读取任何长期高权限 PAT——这是本轮相对旧版的关键收紧。
-- **防重放与完整性**：每次 dispatch 带毫秒时间戳 + 16 字节随机 nonce + SHA-256 摘要，服务端校验 5 分钟时效、用恒定时间比较拒绝篡改与重放。
-- **内容校验**：服务端除文件名/扩展名白名单与大小上限外，还校验 base64 解码后的 **magic bytes**（PNG/JPEG/GIF/WebP/AVIF/BMP），拒绝伪装成图片的 HTML/JS；SVG/SVGZ 解包后过滤 `<script>`、DOCTYPE/ENTITY、事件属性与外部引用。
-- **浏览器令牌加密存储**：「触发令牌」用 WebCrypto **AES-256-GCM** 加密后存 localStorage，密钥存 sessionStorage（关闭标签即失效），页面不再有明文令牌。
-- **SVG 输出清洗**：前端矢量转换结果在落地前清除脚本、事件属性、`javascript:`/外部实体，避免上传的 SVG 在 Pages 同源域内执行脚本。
+- **写入**：浏览器直传 GitHub **Contents API**（PUT/DELETE）。这修复了 v2.x/v3.0 用 `repository_dispatch` 携带图片 base64 的致命缺陷——dispatch 的 `client_payload` 有约 48KB 上限，稍大的图片一律 `client_payload is too large` 上传失败。直传支持到 50MB。
+- **令牌不内置、不进仓库**：公开前端不含任何令牌。部署者/使用者在页面右上角「令牌」按钮里填入一枚仅含本仓库 Contents 读写权限的令牌即可，且应设置过期时间。
+- **令牌加密存储**：令牌用 WebCrypto **AES-256-GCM** 加密后存 localStorage，设备密钥存 sessionStorage（关闭标签即失效），页面内存与存储中均无明文。
+- **最小权限**：文档明确要求令牌只授予本仓库 Contents: read & write；经典 PAT 勾选 `public_repo`（或 `repo`），细粒度令牌仅授权单仓库。
+- **SVG 输出清洗**：前端矢量转换结果在落地前清除脚本、事件属性、`javascript:`、外部实体、`<style>`/`<use>` 外链与控制字符，避免同源 SVG 执行脚本。
 - **严格 CSP**：`script-src 'self' 'wasm-unsafe-eval'`（禁内联脚本/eval，放行 AVIF 的 WASM）、`object-src 'none'`、`base-uri 'none'`、`frame-ancestors 'none'`，API 与图片源显式白名单。
-- **串行限流**：写入工作流串行执行，避免并发冲突并天然限流。
+- **内容校验**：上传前用 magic bytes 校验图片头，拒绝伪装成图片的 HTML/JS；扩展名白名单 + 大小上限双保险。
+- **防重复与限流**：同批内容用 SHA-256 去重，并发上传限 4，避免打爆 API。
+- **规范化签名工具**：前后端共用「对象键递归排序、数组保序」的规范化与 SHA-256 签名，供扩展的服务端校验使用。
 
-### 部署者必读：替换为你自己的令牌
+### 部署者必读：令牌配置
 
-公开仓库/docs 里的令牌仅用于演示，请在自己的仓库按下面步骤配置：
+1. 创建一枚令牌：
+   - 细粒度令牌（推荐）：仅授权 `TechnologySauce/PushPic`，权限 `Contents: read and write`，设过期时间；
+   - 或经典 PAT：勾选 `public_repo`（私有仓库勾 `repo`），设过期时间。
+2. 打开站点，点右上角「⚙ 令牌」，粘贴令牌。它会被 AES-GCM 加密存在你的浏览器本机，不上传任何服务器。
+3. 之后即可上传/删除。换浏览器或清除数据后需重新填一次。
 
-1. 写入凭证无需手动配置：工作流使用 GitHub 自动签发的最小权限 `GITHUB_TOKEN`。若从旧版迁移，建议删除仓库里的 `PUSHPIC_TOKEN` Secret（不再被读取）。
-2. 若要把令牌**加密后**写入 Secrets（明文不落盘、不进 Git 历史，供其它用途），可用随仓库提供的脚本：
-
-   ```bash
-   pip install pynacl
-   GH_TOKEN=<你的管理员PAT> PUSHPIC_TOKEN_VALUE=<写入令牌> \
-     python3 scripts/set-secret.py --repo <owner>/<repo>
-   ```
-
-   脚本用 GitHub Secrets 公钥做 sealed box 加密，等价于 `X25519 + XSalsa20-Poly1305`。
-
-3. 在 `assets/config.js`（或页面里一次性设置并保存在 localStorage）填入一枚**仅能触发本仓库 Actions 的细粒度令牌**作为 `PUSHPIC_DISPATCH_TOKEN`；建议设置过期时间。
-
-> 重要：任何静态前端里的令牌都是公开的。本设计把「高权限写入令牌」彻底移到服务端加密 Secret，浏览器侧只剩低权限触发令牌，这是纯静态 Pages 能达到的最高安全级别。要完全消除浏览器令牌，需要引入带用户登录的后端代理。
+> 重要：任何写进静态文件的令牌都是公开的。本设计不在前端内置令牌，令牌只留在各使用者本机。若要让访客免配置上传，必须引入带登录鉴权的后端代理（云函数/Serverless），把令牌留在服务端——这是纯静态架构做不到取舍。
 
 ## 本地开发
 
