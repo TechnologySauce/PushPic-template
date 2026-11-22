@@ -156,3 +156,12 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-si
   .btn-refresh svg, .btn-refresh.is-loading svg,
   .btn-refresh.is-loading::after { transition: none; animation-duration: 2s; }
 }
+
+
+/* 图片可用性标记：raw 立即可用，Pages 需等部署完成 */
+.tile-ready { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 10px; line-height: 1.5; }
+.tile-ready.ready { background: rgba(78,201,160,.15); color: var(--success); }
+.tile-ready.pending { background: rgba(255,187,87,.15); color: #ffbb57; }
+.link-tag { display: inline-block; padding: 0 6px; border-radius: 999px; font-size: 10px; vertical-align: middle; }
+.link-tag.ready { background: rgba(78,201,160,.15); color: var(--success); }
+.link-tag.pending { background: rgba(255,187,87,.15); color: #ffbb57; }
