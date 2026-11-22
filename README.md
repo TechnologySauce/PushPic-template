@@ -2,6 +2,8 @@
 
 打开即用的 GitHub Pages 图床。图片直接上传到本仓库的 `images/` 目录，通过 Pages 生成外链，页面无需填写仓库、分支或 Token。
 
+Powered by [科技酱](https://docs.asoe.cn) & [PushPic](https://github.com/TechnologySauce/PushPic)。
+
 ## 使用
 
 1. 打开站点：<https://technologysauce.github.io/PushPic/>
@@ -89,6 +91,16 @@ python3 -m http.server 8080
 ```
 
 静态文件无需构建。页面直接调用 GitHub REST API。
+
+## 版本与发布
+
+本项目采用语义化版本（`vMAJOR.MINOR.PATCH`）。**每一次更新都会发布对应的 Release**，记录本轮改动与部署情况：
+
+- 版本号随功能/修复递增；发布时以 `vX.Y.Z` 为 tag 创建 GitHub Release
+- PushPic 主仓库与公开模板仓库 `TechnologySauce/PushPic-template` 保持同步发布
+- Release 说明包含当轮改动点、验证结论、站点与模板仓库地址
+
+历史 Release 见本仓库 [Releases](https://github.com/TechnologySauce/PushPic/releases)。
 
 ## License
 
