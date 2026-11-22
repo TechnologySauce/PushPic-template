@@ -9,9 +9,26 @@
   var TOKEN = atob('Z2hwX1hBSUxNQlRDeE' + 'NwUUE5QUV0cW5hM3M5R0E1OFNCMTBHNmcwRQ==');
   var MAX_FILES = 20;
   var MAX_SIZE = 50 * 1024 * 1024;
-  // 支持的输入格式（含用户列出的全部项）。*.exif 视为 TIFF 元数据格式，按 TIFF 处理。
-  var INPUT_EXTS = ('bmp jpg jpeg jpe png tif tiff gif pcx tga exif fpx svg svgz psd cdr pcd ' +
-    'dxf ufo eps ai raw wmf emf webp avif apng heic heif ico jfif jxl').split(/\s+/);
+  // 支持的输入格式：按扩展名识别，覆盖位图/相机 RAW/矢量设计/传真/Netpbm/JPEG2000/动画等。
+  // 同一格式可能有多个别名扩展名（如 JPEG2000=jp2/j2k/jpx…，JPEG XL=jxl）。
+  var INPUT_EXTS = (
+    // 常见位图
+    'bmp jpg jpeg jpe jfif pjpeg png gif webp avif apng ico ' +
+    // TIFF 系与传真（*.exif 视为 TIFF 元数据，按 TIFF 解码）
+    'tif tiff exif fpx fax g3 g4 ' +
+    // JPEG 2000 / JPEG XL / 新一代压缩格式
+    'jxl jp2 j2k j2c jpf jpx jpm mj2 qoi heif heic jls jpegls jxt jpegxt jxs jpegxs ljpeg ' +
+    // 矢量 / 设计 / 打印
+    'svg svgz psd cdr pcd dxf ufo eps ai wmf emf pict pict2 ' +
+    // 相机 RAW
+    'raw dng cr2 cr3 nef arw orf rw2 raf ' +
+    // Netpbm 无损族
+    'pbm pgm ppm pnm pam ' +
+    // 动画
+    'mng jng ' +
+    // 其它冷门 / 专有格式
+    'pcx tga xbm xpm wbm plic cpt iif pic xv xif hrz pal icb vda vst gro pntg pnt mac'
+  ).split(/\s+/);
   var INPUT_EXT_SET = INPUT_EXTS.reduce(function (m, e) { m[e] = 1; return m; }, {});
   var IMAGE_EXT = new RegExp('\\.(' + INPUT_EXTS.join('|') + ')$', 'i');
   var FORMAT_KEY = 'pushpic.convertFormat';
@@ -20,8 +37,15 @@
   var TIFF_LIB = './vendor/UTIF.js';
   // TIFF 系扩展名（含 FlashPIX/EXIF）：浏览器 <img> 打不开，用 UTIF.js 解码。
   var TIFF_EXT = { tif: 1, tiff: 1, exif: 1, fpx: 1 };
-  // 原始相机格式扩展名各异，这些通常是 RAW；无法解码时原样上传（无损，不做错误转换）。
-  var RAW_HINT_EXT = { raw: 1, cr2: 1, cr3: 1, nef: 1, arw: 1, dng: 1, orf: 1, rw2: 1, raf: 1 };
+  // 浏览器无法可靠解码的格式：转换时跳过解码，原样上传，绝不生成损坏文件。
+  // 相机 RAW、Adobe/Corel 专有格式、JPEG2000/XL/QOI/HEIC 等新版格式、矢量设计、Netpbm、冷门老式格式均在此。
+  var PASSTHROUGH_EXT = (
+    'psd cdr pcd dxf ufo eps ai wmf emf pict pict2 ' +
+    'raw dng cr2 cr3 nef arw orf rw2 raf ' +
+    'jxl jp2 j2k j2c jpf jpx jpm mj2 qoi heif heic jls jpegls jxt jpegxt jxs jpegxs ljpeg ' +
+    'pbm pgm ppm pnm pam mng jng xbm xpm wbm plic cpt iif pic xv xif hrz pal icb vda vst gro pntg pnt mac ' +
+    'pcx tga fax g3 g4'
+  ).split(/\s+/).reduce(function (m, e) { m[e] = 1; return m; }, {});
 
   var state = { files: [], page: 1, pageSize: 24, query: '', refreshing: false, lastRefresh: 0,
     viewFiles: [], previewIndex: -1 };
@@ -423,8 +447,11 @@
 
   function fallbackOriginal(file, err) {
     return readFile(file).then(function (orig) {
-      return { base64: orig, ext: (file.name.match(/\.([^.]+)$/) || [, 'png'])[1].toLowerCase(),
-        bytes: file.size, kept: true, note: err && err.message ? err.message : '' };
+      var origExt = (file.name.match(/\.([^.]+)$/) || [, 'png'])[1].toLowerCase();
+      // 未知扩展名统一用 png 落地，避免写出浏览器/GitHub Pages 不识别的后缀。
+      var ext = INPUT_EXT_SET[origExt] ? origExt : 'png';
+      return { base64: orig, ext: ext, bytes: file.size, kept: true,
+        note: err && err.message ? err.message : '' };
     });
   }
 
@@ -453,21 +480,19 @@
     if (format === 'keep') return readFile(file).then(function (base64) {
       return { base64: base64, ext: (INPUT_EXT_SET[origExt] ? origExt : 'png'), bytes: file.size };
     });
+    // 浏览器无法可靠解码的格式：直接原样保留，跳过解码，既省时又绝不写坏文件。
+    if (PASSTHROUGH_EXT[origExt]) {
+      return fallbackOriginal(file, new Error('.' + origExt + ' 浏览器无法可靠解码，已原样保留'));
+    }
     return blobToDataUrl(file).then(function (dataUrl) {
       if (format === 'svg') {
         return bitmapToSvg(file, dataUrl).then(function (base64) {
           return { base64: base64, ext: 'svg', bytes: Math.floor(base64.length * 3 / 4) };
-        }).catch(function () { return fallbackOriginal(file, new Error('矢量转换失败')); });
+        }).catch(function () { return fallbackOriginal(file, new Error('矢量转换失败，已原样保留')); });
       }
+      // 任何转换失败都回退原图：图床首要目标是不丢文件，转换只是增强。
       return convertToRaster(file, dataUrl, format, file.size)
-        .catch(function (err) {
-          // 专有/RAW/未知格式浏览器解码不了：原样上传，绝不写坏数据。
-          var hinted = RAW_HINT_EXT[origExt] || !INPUT_EXT_SET[origExt];
-          if (hinted || /解码|尺寸无效|无法解析|不可用|加载失败|失败/.test(err.message || '')) {
-            return fallbackOriginal(file, err);
-          }
-          throw err;
-        });
+        .catch(function () { return fallbackOriginal(file, new Error('转换失败，已原样保留')); });
     });
   }
 
@@ -887,7 +912,7 @@
     var savedFormat = getConvertFormat();
     el.formatSelect.value = savedFormat;
     var hints = {
-      keep: '按原文件上传，支持 bmp/jpg/png/tif/gif/pcx/tga/exif/fpx/svg/psd/cdr/pcd/dxf/ufo/eps/ai/raw/wmf/webp/avif/apng 等 30+ 种格式',
+      keep: '按原文件上传，覆盖 80+ 种扩展名：常见位图/JPEG2000/JXL/QOI/HEIC/AVIF/TIFF/传真/RAW/矢量设计/Netpbm/动画等',
       webp: '浏览器本地转 WebP，通常体积更小；转换后更大或无法解码则保留原图',
       avif: '浏览器本地转 AVIF（更高压缩率），首次使用需加载约 4.5 MB 编码组件；转换后更大则保留原图',
       svg: '转为矢量轮廓，适合图标/线条图；照片类不建议使用'
