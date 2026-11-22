@@ -22,11 +22,17 @@
 
 ## Logo
 
-`assets/img/logo.png`（512×512 透明背景）为项目图标，另有 `logo-180.png`（Apple Touch Icon）、`favicon-64.png` 和 `favicon.ico`。源文件由 `tools/gen_logo.py` 生成，重新生成只需 Pillow：
+`assets/img/logo.png`（512×512 透明背景）为项目图标：蓝紫渐变的圆角图片卡片 + 太阳/山峰图片符号 + 青绿色上传徽标。另有 `logo-180.png`（Apple Touch Icon）、`favicon-64.png` 和 `favicon.ico`。源文件由 `tools/gen_logo.py` 生成，重新生成只需 Pillow：
 
 ```bash
 python3 tools/gen_logo.py
 ```
+
+## 性能与交互
+
+- **请求提速**：图片列表用 ETag（`If-None-Match`）走 304 省流量；相同 URL 的并发请求自动去重；网络抖动/5xx 自动重试一次。
+- **批量上传**：最多 4 张并发处理，转换与上传重叠；每张上传成功后立即出现在图片库，不必等整批完成。
+- **刷新按钮**：点击后按钮内实时显示「刷新中 → 已更新 / 重试」，带旋转进度与状态色，800ms 内连点自动忽略，避免重复打 API。
 
 ## 链接
 
