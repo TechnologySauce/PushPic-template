@@ -10,7 +10,7 @@
   <link rel="icon" type="image/x-icon" href="./assets/favicon.ico?v=3a17c9d1" />
   <link rel="apple-touch-icon" href="./assets/img/logo-180.png?v=2f5c81a4" />
   <title>PushPic · 开箱即用图床</title>
-  <link rel="stylesheet" href="./assets/style.css?v=c4d9e7b2" />
+  <link rel="stylesheet" href="./assets/style.css?v=9b4f2c7a" />
 </head>
 <body>
   <header class="topbar">
@@ -71,7 +71,18 @@
         </div>
       </div>
       <div class="gallery-toolbar">
-        <span id="resultCount" class="result-count">共 0 张</span>
+        <div class="toolbar-left">
+          <span id="resultCount" class="result-count">共 0 张</span>
+          <button id="favFilterBtn" class="chip" type="button" aria-pressed="false" title="只看收藏">☆ 收藏</button>
+          <label class="page-size-label">每页
+            <select id="pageSizeSelect" class="select select-sm" aria-label="每页显示数量">
+              <option value="12">12</option>
+              <option value="24" selected>24</option>
+              <option value="48">48</option>
+              <option value="all">全部</option>
+            </select>
+          </label>
+        </div>
         <span id="refreshMeta" class="refresh-meta">尚未刷新</span>
       </div>
       <div id="gallery" class="gallery">
@@ -102,6 +113,6 @@
     </div>
   </div>
 
-  <script src="./assets/app.js?v=c4d9e7b2"></script>
+  <script src="./assets/app.js?v=9b4f2c7a"></script>
 </body>
 </html>
