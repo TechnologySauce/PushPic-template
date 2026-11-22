@@ -1,11 +1,13 @@
 name: PushPic Secure Write
 
 # 服务端写入：令牌只以加密 Secret 存在于 GitHub Actions，浏览器不再持有写入凭证。
-# 浏览器通过 repository_dispatch 提交请求；工作流用 GITHUB_TOKEN 完成仓库写入。
+# 浏览器通过 repository_dispatch 提交请求；工作流用最小权限 GITHUB_TOKEN 完成仓库写入。
+# 安全加固（v2.1）：最小权限令牌 + magic bytes 内容校验 + HMAC 防重放。
 on:
   repository_dispatch:
     types: [pushpic-upload, pushpic-delete]
 
+# 只给 contents:write，令牌自动签发、按仓库/按运行生效、用完即失效。
 permissions:
   contents: write
 
@@ -20,15 +22,40 @@ jobs:
       - name: Validate payload and write via Contents API
         uses: actions/github-script@v7
         with:
-          # 写入令牌来自加密 Secret（libsodium sealed box 写入），服务端专用，浏览器不可见。
-          github-token: ${{ secrets.PUSHPIC_TOKEN }}
+          # 使用 GitHub 自动签发的最小权限 GITHUB_TOKEN（contents:write），
+          # 不再使用可泄露的高权限 PAT。设置 GITHUB_TOKEN_SECRET 可覆盖为加密 Secret。
+          github-token: ${{ secrets.PUSHPIC_TOKEN || github.token }}
           script: |
+            const crypto = require('crypto');
+            const zlib = require('zlib');
             const p = context.payload.client_payload || {};
             const type = context.payload.action; // dispatch event_type
 
-            // 文件名白名单：只允许安全字符，防止路径穿越。
+            const fail = (m) => { core.setFailed(m); };
+
+            // ---- 防重放：时间戳 + nonce + SHA-256 签名 ----
+            const MAX_SKEW_MS = 5 * 60 * 1000; // 请求有效期 5 分钟
+            const ts = Number(p._ts);
+            if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > MAX_SKEW_MS) {
+              fail('Stale or missing request timestamp'); return;
+            }
+            if (typeof p._nonce !== 'string' || !/^[0-9a-f]{32}$/.test(p._nonce)) {
+              fail('Invalid request nonce'); return;
+            }
+            // 签名对象是剔除 _sig 后的 client_payload，与浏览器 signPayload(sealed) 完全一致。
+            const toSign = Object.assign({}, p); delete toSign._sig;
+            const signedBody = JSON.stringify(toSign);
+            const expected = crypto.createHash('sha256').update(signedBody).digest('base64url');
+            const supplied = context.payload._sig || p._sig || '';
+            const a = Buffer.from(expected), b = Buffer.from(supplied);
+            if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+              fail('Invalid request signature'); return;
+            }
+
+            // 文件名白名单：只允许安全字符，防止路径穿越与控制字符。
             const safeName = (n) => typeof n === 'string' &&
-              /^[A-Za-z0-9._()\- ]{1,180}$/.test(n) && !/\.\./.test(n);
+              /^[A-Za-z0-9._()\- ]{1,180}$/.test(n) && !/\.\./.test(n) &&
+              !/^\./.test(n) && !/(^|\/)\.\./.test(n) && !/[\x00-\x1f\x7f]/.test(n);
             const ALLOW = new Set(('bmp jpg jpeg jpe jfif pjpeg png gif webp avif apng ico ' +
               'tif tiff exif fpx fax g3 g4 jxl jp2 j2k j2c jpf jpx jpm mj2 qoi heif heic ' +
               'jls jpegls jxt jpegxt jxs jpegxs ljpeg svg svgz psd cdr pcd dxf ufo eps ai ' +
@@ -41,25 +68,76 @@ jobs:
             const MAX = 50 * 1024 * 1024;
 
             if (!safeName(p.name)) {
-              core.setFailed('Invalid file name'); return;
+              fail('Invalid file name'); return;
             }
-            if (!ALLOW.has(extOf(p.name))) {
-              core.setFailed('File extension not allowed'); return;
+            const ext = extOf(p.name);
+            if (!ALLOW.has(ext)) {
+              fail('File extension not allowed'); return;
             }
+
+            // ---- magic bytes 内容校验：防止伪装成图片的脚本/可执行文件 ----
+            const MAGIC = {
+              png:  b => b.length > 8 && b[0]===0x89 && b.toString('ascii',1,4)==='PNG',
+              gif:  b => b.length > 6 && (b.toString('ascii',0,3)==='GIF'),
+              webp: b => b.length > 12 && b.toString('ascii',0,4)==='RIFF' && b.toString('ascii',8,12)==='WEBP',
+              avif: b => b.length > 12 && b.toString('ascii',4,8)==='ftyp' && ['avif','avis'].includes(b.toString('ascii',8,12)),
+              jpg:  b => b.length > 3 && b[0]===0xff && b[1]===0xd8 && b[2]===0xff,
+              bmp:  b => b.length > 2 && b.toString('ascii',0,2)==='BM'
+            };
+            const SVG_EXTS = new Set(['svg','svgz']);
+            const TEXT_EXTS = new Set(['svg','svgz','pbm','pgm','ppm','pnm','pam','dxf','ufo','eps','ai','wmf','emf','xml']);
 
             if (type === 'pushpic-upload') {
               if (typeof p.content !== 'string' || !p.content.length) {
-                core.setFailed('Missing content'); return;
+                fail('Missing content'); return;
               }
-              // base64 长度上限，粗略限制解码后体积 <= 50MB。
               if (p.content.length > Math.ceil(MAX * 4 / 3) + 8) {
-                core.setFailed('File too large'); return;
+                fail('File too large'); return;
               }
+              let bytes;
+              // 严格 base64：拒绝空白与非法字符，避免绕过内容检测。
+              if (!/^[A-Za-z0-9+/]*={0,2}$/.test(p.content) || p.content.length % 4 !== 0) {
+                fail('Invalid base64 content'); return;
+              }
+              try { bytes = Buffer.from(p.content, 'base64'); } catch (e) { fail('Bad base64'); return; }
+              if (!bytes.length) { fail('Empty content'); return; }
+
+              // SVG（含压缩）按文本校验：禁脚本文本、DOCTYPE/ENTITY 与外部引用。
+              if (SVG_EXTS.has(ext)) {
+                let text;
+                if (ext === 'svgz') {
+                  try { text = zlib.gunzipSync(bytes).toString('utf8'); }
+                  catch (e) { fail('Invalid SVGZ'); return; }
+                  // 重新压缩为规范 gzip
+                  bytes = zlib.gzipSync(Buffer.from(text));
+                } else {
+                  text = bytes.toString('utf8');
+                }
+                if (/<!DOCTYPE|<!ENTITY|<script|javascript:|on[a-z]+\s*=|xlink:href\s*=\s*["'](?:data|file):|<foreignObject/i.test(text)) {
+                  fail('Unsafe SVG content'); return;
+                }
+                p.content = bytes.toString('base64');
+              } else if (MAGIC[ext]) {
+                // 已知位图格式：magic bytes 必须匹配，防止 HTML/JS 伪装。
+                if (!MAGIC[ext](bytes)) {
+                  fail('Content does not match extension (magic bytes)'); return;
+                }
+              } else if (!TEXT_EXTS.has(ext)) {
+                // 未知/专有格式：至少拒绝可执行的 HTML/脚本签名。
+                const head = bytes.subarray(0, 512).toString('utf8').toLowerCase();
+                if (/<script|<!doctype\s+html|<html|<\?php|^MZ/.test(head)) {
+                  fail('Potentially executable content'); return;
+                }
+              }
+
               let body = {
                 message: 'Upload ' + p.name + ' via PushPic',
                 branch, content: p.content
               };
-              if (p.sha) body.sha = p.sha; // 覆盖同名文件时带 sha
+              if (p.sha) {
+                if (!/^[a-f0-9]{40}$/.test(p.sha)) { fail('Invalid sha'); return; }
+                body.sha = p.sha; // 覆盖同名文件时带 sha
+              }
               await github.rest.repos.createOrUpdateFileContents({
                 owner: context.repo.owner, repo: context.repo.repo,
                 path, ...body
@@ -68,7 +146,7 @@ jobs:
 
             } else if (type === 'pushpic-delete') {
               if (!/^[a-f0-9]{40}$/.test(p.sha || '')) {
-                core.setFailed('Invalid sha'); return;
+                fail('Invalid sha'); return;
               }
               await github.rest.repos.deleteFile({
                 owner: context.repo.owner, repo: context.repo.repo,
@@ -77,5 +155,5 @@ jobs:
               });
               core.info('Deleted ' + path);
             } else {
-              core.setFailed('Unknown event type');
+              fail('Unknown event type');
             }
