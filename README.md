@@ -84,11 +84,34 @@ python3 tools/gen_logo.py
 
 > 上传后 raw 链接立即可用；Pages 链接可能需要几十秒才会生效。
 
-## 安全说明
+## 安全架构（v2.0 起）
 
-页面内置了用于写入本仓库的访问令牌，因此访客打开页面即可上传，不需要自行配置密钥。
+**写入令牌不再出现在浏览器，也不在仓库前端文件里。** 这是与旧版最本质的区别。
 
-该令牌随前端文件公开，任何访问站点的人都能上传或删除仓库内图片。若要限制权限，请撤销该令牌并改用带鉴权的后端代理。请不要在公共电脑上使用本站点。
+- **读取**：图片库列表走 GitHub 公开 API，任何人都能看，无需令牌。
+- **写入**：浏览器只向 `repository_dispatch` 提交一条上传/删除请求；真正写仓库由服务端 GitHub Actions 工作流用令牌完成。该令牌以 **libsodium sealed box（X25519 密钥交换 + XSalsa20-Poly1305 AEAD 认证加密，CSPRNG 随机 nonce）** 加密后存入 GitHub Actions Secrets，仅服务端可用，浏览器无从读取。
+- **工作流防护**：校验文件名白名单、扩展名白名单、文件大小上限，并串行执行天然的限流，防止路径穿越与滥用。
+- **浏览器持有的只是「触发令牌」**：它只用于触发工作流，无法直接读写仓库文件。泄露的最坏情况是有人触发上传请求，仍被工作流的校验与限流约束。
+
+### 部署者必读：替换为你自己的令牌
+
+公开仓库/docs 里的令牌仅用于演示，请在自己的仓库按下面步骤配置：
+
+1. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 新建两个 Secret：
+   - `PUSHPIC_TOKEN`：一个有 `repo` 写入权限的 classic PAT（服务端写仓库用）。
+2. 用随仓库提供的脚本，把令牌**加密后**写入 Secrets（明文不落盘、不进 Git 历史）：
+
+   ```bash
+   pip install pynacl
+   GH_TOKEN=<你的管理员PAT> PUSHPIC_TOKEN_VALUE=<写入令牌> \
+     python3 scripts/set-secret.py --repo <owner>/<repo>
+   ```
+
+   脚本用 GitHub Secrets 公钥做 sealed box 加密，等价于 `X25519 + XSalsa20-Poly1305`。
+
+3. 在 `assets/config.js`（或页面里一次性设置并保存在 localStorage）填入一枚**仅能触发本仓库 Actions 的细粒度令牌**作为 `PUSHPIC_DISPATCH_TOKEN`；建议设置过期时间。
+
+> 重要：任何静态前端里的令牌都是公开的。本设计把「高权限写入令牌」彻底移到服务端加密 Secret，浏览器侧只剩低权限触发令牌，这是纯静态 Pages 能达到的最高安全级别。要完全消除浏览器令牌，需要引入带用户登录的后端代理。
 
 ## 本地开发
 
