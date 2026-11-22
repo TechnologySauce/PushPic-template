@@ -1,0 +1,82 @@
+name: PushPic Secure Write
+
+# 服务端写入：令牌只以加密 Secret 存在于 GitHub Actions，浏览器不再持有写入凭证。
+# 浏览器通过 repository_dispatch 提交请求；工作流用 GITHUB_TOKEN 完成仓库写入。
+on:
+  repository_dispatch:
+    types: [pushpic-upload, pushpic-delete]
+
+permissions:
+  contents: write
+
+jobs:
+  write:
+    runs-on: ubuntu-latest
+    # 串行执行，避免并发写同一文件产生冲突，也天然限流。
+    concurrency:
+      group: pushpic-write
+      cancel-in-progress: false
+    steps:
+      - name: Validate payload and write via Contents API
+        uses: actions/github-script@v7
+        with:
+          # 写入令牌来自加密 Secret（libsodium sealed box 写入），服务端专用，浏览器不可见。
+          github-token: ${{ secrets.PUSHPIC_TOKEN }}
+          script: |
+            const core = require('@actions/core');
+            const p = context.payload.client_payload || {};
+            const type = context.payload.action; // dispatch event_type
+
+            // 文件名白名单：只允许安全字符，防止路径穿越。
+            const safeName = (n) => typeof n === 'string' &&
+              /^[A-Za-z0-9._()\- ]{1,180}$/.test(n) && !/\.\./.test(n);
+            const ALLOW = new Set(('bmp jpg jpeg jpe jfif pjpeg png gif webp avif apng ico ' +
+              'tif tiff exif fpx fax g3 g4 jxl jp2 j2k j2c jpf jpx jpm mj2 qoi heif heic ' +
+              'jls jpegls jxt jpegxt jxs jpegxs ljpeg svg svgz psd cdr pcd dxf ufo eps ai ' +
+              'wmf emf pict pict2 raw dng cr2 cr3 nef arw orf rw2 raf pbm pgm ppm pnm pam ' +
+              'mng jng pcx tga xbm xpm wbm plic cpt iif pic xv xif hrz pal icb vda vst gro ' +
+              'pntg pnt mac').split(/\s+/));
+            const extOf = (n) => (n.match(/\.([^.]+)$/) || [, ''])[1].toLowerCase();
+            const path = 'images/' + (p.name || '');
+            const branch = 'main';
+            const MAX = 50 * 1024 * 1024;
+
+            if (!safeName(p.name)) {
+              core.setFailed('Invalid file name'); return;
+            }
+            if (!ALLOW.has(extOf(p.name))) {
+              core.setFailed('File extension not allowed'); return;
+            }
+
+            if (type === 'pushpic-upload') {
+              if (typeof p.content !== 'string' || !p.content.length) {
+                core.setFailed('Missing content'); return;
+              }
+              // base64 长度上限，粗略限制解码后体积 <= 50MB。
+              if (p.content.length > Math.ceil(MAX * 4 / 3) + 8) {
+                core.setFailed('File too large'); return;
+              }
+              let body = {
+                message: 'Upload ' + p.name + ' via PushPic',
+                branch, content: p.content
+              };
+              if (p.sha) body.sha = p.sha; // 覆盖同名文件时带 sha
+              await github.rest.repos.createOrUpdateFileContents({
+                owner: context.repo.owner, repo: context.repo.repo,
+                path, ...body
+              });
+              core.info('Uploaded ' + path);
+
+            } else if (type === 'pushpic-delete') {
+              if (!/^[a-f0-9]{40}$/.test(p.sha || '')) {
+                core.setFailed('Invalid sha'); return;
+              }
+              await github.rest.repos.deleteFile({
+                owner: context.repo.owner, repo: context.repo.repo,
+                path, message: 'Delete ' + p.name + ' via PushPic',
+                sha: p.sha, branch
+              });
+              core.info('Deleted ' + path);
+            } else {
+              core.setFailed('Unknown event type');
+            }
