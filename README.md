@@ -27,9 +27,21 @@ Pages 链接生效后，复制到的短链即可用于外链。
 
 - **保持原格式**：不做处理，直接上传原文件
 - **WebP**：浏览器本地转换为 WebP（质量 0.82），转换后反而更大时自动保留原图
+- **AVIF**：浏览器本地转换为 AVIF（更高压缩率，首次使用需加载约 4.5 MB 编码组件），转换后更大则保留原图
 - **SVG**：使用 ImageTracer 在浏览器本地做颜色量化描摹，适合图标/线条图；照片类不建议使用
 
-转换全部在浏览器完成，不经过任何第三方服务端。矢量转换库 `vendor/imagetracer_v1.2.6.js` 已随仓库提供，无需联网加载第三方资源。
+### 支持的输入格式
+
+覆盖你列出的全部格式，共 30+ 种：
+
+- **常见位图**：bmp、jpg/jpeg、png、gif、webp、avif、apng、ico
+- **扫描/打印/交换**：tif/tiff、exif、fpx（TIFF 系用 `vendor/UTIF.js` 解码）、pcx、tga、pcd
+- **矢量/设计**：svg/svgz、eps、ai、cdr、dxf、wmf/emf、ufo
+- **相机 RAW**：raw、cr2、cr3、nef、arw、dng 等
+
+转换全部在浏览器完成，不经过任何第三方服务端。TIFF 解码库 `vendor/UTIF.js`、矢量转换库 `vendor/imagetracer_v1.2.6.js`、AVIF 编码器 `vendor/jsquash2/` 均已随仓库提供，无需联网加载第三方资源。
+
+> 说明：浏览器对格式的解码能力由内核决定。位图（PNG/JPEG/GIF/BMP/WebP/AVIF/SVG/ICO）可直接由浏览器解码；TIFF/EXIF/FPX 由内置 UTIF.js 补充解码。psd/cdr/dxf/ufo/eps/ai/wmf/RAW 这类专有或矢量/相机格式，浏览器无法可靠解码，转换时会**原样保留上传**（不会生成损坏文件）；想要 WebP/AVIF 请先用专业软件另存为 PNG/JPEG。
 
 ## Logo
 
