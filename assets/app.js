@@ -1029,7 +1029,7 @@
     ['repoBadge', 'pagesBadge', 'dropzone', 'fileInput', 'progressWrap', 'progressBar', 'progressText',
      'status', 'gallery', 'searchInput', 'searchClear', 'resultCount', 'refreshBtn', 'refreshMeta', 'pagination', 'prevBtn', 'nextBtn', 'pageInfo',
      'previewModal', 'previewName', 'previewImg', 'previewLinks', 'formatSelect', 'formatHint',
-     'favFilterBtn', 'pageSizeSelect'].forEach(function (id) { el[id] = $(id); });
+     'favFilterBtn', 'pageSizeSelect', 'tokenBtn'].forEach(function (id) { el[id] = $(id); });
 
     var savedFormat = getConvertFormat();
     el.formatSelect.value = savedFormat;
@@ -1116,6 +1116,19 @@
       var next = (state.previewIndex + step + view.length) % view.length;
       openPreview(view[next]);
     });
+
+    // 令牌设置：拥有者一次性填入「仅触发 Actions」的低权限令牌，保存在本机，不写入仓库。
+    function openTokenDialog() {
+      var current = readDispatchToken();
+      var val = window.prompt(
+        '设置上传凭证（仅用于触发本仓库 Actions 的细粒度令牌，保存在你的浏览器，不会上传到仓库）：\n' +
+        '留空可清除。详见 README「安全架构」。', current || '');
+      if (val === null) return;
+      val = val.trim();
+      saveDispatchToken(val);
+      setStatus(val ? '已保存上传凭证（仅本机）。' : '已清除上传凭证。', val ? 'ok' : '');
+    }
+    if (el.tokenBtn) el.tokenBtn.addEventListener('click', openTokenDialog);
 
     refresh();
   }
