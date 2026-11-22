@@ -1,1 +1,68 @@
-IiIiR2VuZXJhdGUgUHVzaFBpYyB0cmFuc3BhcmVudCBQTkcgZmF2aWNvbi9sb2dvIHdpdGggUGlsbG93IChubyBleHRlcm5hbCBhc3NldHMpLiIiIgpmcm9tIFBJTCBpbXBvcnQgSW1hZ2UsIEltYWdlRHJhdwoKUyA9IDUxMgpTUyA9IDQKaW1nID0gSW1hZ2UubmV3KCdSR0JBJywgKFMgKiBTUywgUyAqIFNTKSwgKDAsIDAsIDAsIDApKQpkID0gSW1hZ2VEcmF3LkRyYXcoaW1nKQprID0gU1MKCiMgUm91bmRlZCB0aWxlIHdpdGggdmVydGljYWwgZ3JhZGllbnQgYW5kIGEgc3VidGxlIG91dGxpbmUuCnIgPSAxMTIgKiBrCnRpbGUgPSBJbWFnZS5uZXcoJ1JHQkEnLCAoUyAqIFNTLCBTICogU1MpLCAoMCwgMCwgMCwgMCkpCnRkID0gSW1hZ2VEcmF3LkRyYXcodGlsZSkKdGQucm91bmRlZF9yZWN0YW5nbGUoKDQwKmssIDQwKmssIChTLTQwKSprLCAoUy00MCkqayksIHJhZGl1cz1yLCBmaWxsPSgyNTUsIDI1NSwgMjU1LCAyNTUpKQpncmFkID0gSW1hZ2UubmV3KCdSR0InLCAoMSwgUypTUykpCmdwID0gZ3JhZC5sb2FkKCkKZm9yIHkgaW4gcmFuZ2UoUypTUyk6CiAgICB0ID0geSAvIChTKlNTIC0gMSkKICAgIGdwWzAsIHldID0gKGludCgxMTAgKyAoNjItMTEwKSp0KSwgaW50KDEzMiArICg4Ni0xMzIpKnQpLCBpbnQoMjU1ICsgKDIxOC0yNTUpKnQpKQptYXNrID0gdGlsZS5nZXRjaGFubmVsKCdBJykKYmFzZSA9IEltYWdlLm5ldygnUkdCQScsIGltZy5zaXplLCAoMCwgMCwgMCwgMCkpCmJhc2UucGFzdGUoZ3JhZC5yZXNpemUoaW1nLnNpemUpLCAoMCwgMCkpCmJhc2UucHV0YWxwaGEobWFzaykKaW1nLmFscGhhX2NvbXBvc2l0ZShiYXNlKQoKIyBTb2Z0IGlubmVyIHRvcCBoaWdobGlnaHQuCmQucm91bmRlZF9yZWN0YW5nbGUoKDUyKmssIDUyKmssIChTLTUyKSprLCAoUy01MikqayksIHJhZGl1cz0oci0xMiprKSwKICAgICAgICAgICAgICAgICAgICBvdXRsaW5lPSgyNTUsIDI1NSwgMjU1LCA2MiksIHdpZHRoPTMqaykKCiMgQ2xvdWQgc2lsaG91ZXR0ZSAoYSBibG9iIG9mIHRocmVlIGNpcmNsZXMgKyBhIGZsYXQgYmFzZSksIGRyYXduIHdoaXRlLgp3aGl0ZSA9ICgyNTUsIDI1NSwgMjU1LCAyNTUpCmNsb3VkX3kgPSAyODUgKiBrCmQuZWxsaXBzZSgoMTIwKmssIGNsb3VkX3ktNTgqaywgMjY4KmssIGNsb3VkX3krNzAqayksIGZpbGw9d2hpdGUpCmQuZWxsaXBzZSgoMTk4KmssIGNsb3VkX3ktMTEwKmssIDM3MiprLCBjbG91ZF95KzY2KmspLCBmaWxsPXdoaXRlKQpkLmVsbGlwc2UoKDMwMCprLCBjbG91ZF95LTYyKmssIDQxNCprLCBjbG91ZF95KzcyKmspLCBmaWxsPXdoaXRlKQpkLnJvdW5kZWRfcmVjdGFuZ2xlKCgxMjYqaywgY2xvdWRfeSs4KmssIDQwMiprLCBjbG91ZF95Kzc0KmspLCByYWRpdXM9MzIqaywgZmlsbD13aGl0ZSkKCiMgVXAtYXJyb3cgY2FydmVkIGluIHRoZSBjbG91ZCB3aXRoIHRoZSBncmFkaWVudCBjb2xvdXIuCmFycm93ID0gSW1hZ2UubmV3KCdSR0JBJywgaW1nLnNpemUsICgwLCAwLCAwLCAwKSkKYWQgPSBJbWFnZURyYXcuRHJhdyhhcnJvdykKYWQucm91bmRlZF9yZWN0YW5nbGUoKDIzOCprLCAyMTQqaywgMjkyKmssIDM2MCprKSwgcmFkaXVzPTEyKmssIGZpbGw9KDI1NSwgMjU1LCAyNTUsIDI1NSkpCmFkLnBvbHlnb24oWygyNjUqaywgMTcyKmspLCAoMzUwKmssIDI1NCprKSwgKDMwMiprLCAyNTQqayksCiAgICAgICAgICAgICgzMDIqaywgMzAwKmspLCAoMjI4KmssIDMwMCprKSwgKDIyOCprLCAyNTQqayksICgxODAqaywgMjU0KmspXSwgZmlsbD0oMjU1LCAyNTUsIDI1NSwgMjU1KSkKIyBQdW5jaCB0aGUgYXJyb3cgb3V0IG9mIHRoZSBjbG91ZCBieSB1c2luZyBpdCBhcyBhbiBlcmFzZXIgb24gdGhlIHdoaXRlIGxheWVyLgpjbG91ZF9sYXllciA9IEltYWdlLm5ldygnUkdCQScsIGltZy5zaXplLCAoMCwgMCwgMCwgMCkpCmNkID0gSW1hZ2VEcmF3LkRyYXcoY2xvdWRfbGF5ZXIpCmNkLmVsbGlwc2UoKDEyMCprLCBjbG91ZF95LTU4KmssIDI2OCprLCBjbG91ZF95KzcwKmspLCBmaWxsPXdoaXRlKQpjZC5lbGxpcHNlKCgxOTgqaywgY2xvdWRfeS0xMTAqaywgMzcyKmssIGNsb3VkX3krNjYqayksIGZpbGw9d2hpdGUpCmNkLmVsbGlwc2UoKDMwMCprLCBjbG91ZF95LTYyKmssIDQxNCprLCBjbG91ZF95KzcyKmspLCBmaWxsPXdoaXRlKQpjZC5yb3VuZGVkX3JlY3RhbmdsZSgoMTI2KmssIGNsb3VkX3krOCprLCA0MDIqaywgY2xvdWRfeSs3NCprKSwgcmFkaXVzPTMyKmssIGZpbGw9d2hpdGUpCiMgQ29tcG9zaXRlIGFycm93LWhvbGUgdXNpbmcgSW1hZ2VDaG9wcyBmb3IgY29ycmVjdG5lc3MuCmZyb20gUElMIGltcG9ydCBJbWFnZUNob3BzCmNsb3VkX2xheWVyLnB1dGFscGhhKEltYWdlQ2hvcHMuc3VidHJhY3QoY2xvdWRfbGF5ZXIuZ2V0Y2hhbm5lbCgnQScpLCBhcnJvdy5nZXRjaGFubmVsKCdBJykpKQppbWcuYWxwaGFfY29tcG9zaXRlKGNsb3VkX2xheWVyKQoKIyBSZWNvbG91ciB0aGUgY2FydmVkIGFycm93IHdpdGggdGhlIGJyYW5kIGdyYWRpZW50LgphcnJvd19sYXllciA9IEltYWdlLm5ldygnUkdCQScsIGltZy5zaXplLCAoMCwgMCwgMCwgMCkpCmFycm93X2xheWVyLnBhc3RlKGdyYWQucmVzaXplKGltZy5zaXplKSwgKDAsIDApKQphcnJvd19sYXllci5wdXRhbHBoYShhcnJvdy5nZXRjaGFubmVsKCdBJykpCmltZy5hbHBoYV9jb21wb3NpdGUoYXJyb3dfbGF5ZXIpCgpvdXQgPSBpbWcucmVzaXplKChTLCBTKSwgSW1hZ2UuTEFOQ1pPUykKb3V0LnNhdmUoJ2Fzc2V0cy9pbWcvbG9nby5wbmcnLCBvcHRpbWl6ZT1UcnVlKQpvdXQucmVzaXplKCgxODAsIDE4MCksIEltYWdlLkxBTkNaT1MpLnNhdmUoJ2Fzc2V0cy9pbWcvbG9nby0xODAucG5nJywgb3B0aW1pemU9VHJ1ZSkKb3V0LnJlc2l6ZSgoNjQsIDY0KSwgSW1hZ2UuTEFOQ1pPUykuc2F2ZSgnYXNzZXRzL2ltZy9mYXZpY29uLTY0LnBuZycsIG9wdGltaXplPVRydWUpCiMgSUNPIHdpdGggbXVsdGlwbGUgc2l6ZXMuCm91dC5zYXZlKCdhc3NldHMvZmF2aWNvbi5pY28nLCBzaXplcz1bKDE2LCAxNiksICgzMiwgMzIpLCAoNDgsIDQ4KSwgKDY0LCA2NCldKQpwcmludCgnbG9nb3Mgd3JpdHRlbicpCg==
+"""Generate PushPic transparent PNG favicon/logo with Pillow (no external assets)."""
+from PIL import Image, ImageDraw
+
+S = 512
+SS = 4
+img = Image.new('RGBA', (S * SS, S * SS), (0, 0, 0, 0))
+d = ImageDraw.Draw(img)
+k = SS
+
+# Rounded tile with vertical gradient and a subtle outline.
+r = 112 * k
+tile = Image.new('RGBA', (S * SS, S * SS), (0, 0, 0, 0))
+td = ImageDraw.Draw(tile)
+td.rounded_rectangle((40*k, 40*k, (S-40)*k, (S-40)*k), radius=r, fill=(255, 255, 255, 255))
+grad = Image.new('RGB', (1, S*SS))
+gp = grad.load()
+for y in range(S*SS):
+    t = y / (S*SS - 1)
+    gp[0, y] = (int(110 + (62-110)*t), int(132 + (86-132)*t), int(255 + (218-255)*t))
+mask = tile.getchannel('A')
+base = Image.new('RGBA', img.size, (0, 0, 0, 0))
+base.paste(grad.resize(img.size), (0, 0))
+base.putalpha(mask)
+img.alpha_composite(base)
+
+# Soft inner top highlight.
+d.rounded_rectangle((52*k, 52*k, (S-52)*k, (S-52)*k), radius=(r-12*k),
+                    outline=(255, 255, 255, 62), width=3*k)
+
+# Cloud silhouette (a blob of three circles + a flat base), drawn white.
+white = (255, 255, 255, 255)
+cloud_y = 285 * k
+d.ellipse((120*k, cloud_y-58*k, 268*k, cloud_y+70*k), fill=white)
+d.ellipse((198*k, cloud_y-110*k, 372*k, cloud_y+66*k), fill=white)
+d.ellipse((300*k, cloud_y-62*k, 414*k, cloud_y+72*k), fill=white)
+d.rounded_rectangle((126*k, cloud_y+8*k, 402*k, cloud_y+74*k), radius=32*k, fill=white)
+
+# Up-arrow carved in the cloud with the gradient colour.
+arrow = Image.new('RGBA', img.size, (0, 0, 0, 0))
+ad = ImageDraw.Draw(arrow)
+ad.rounded_rectangle((238*k, 214*k, 292*k, 360*k), radius=12*k, fill=(255, 255, 255, 255))
+ad.polygon([(265*k, 172*k), (350*k, 254*k), (302*k, 254*k),
+            (302*k, 300*k), (228*k, 300*k), (228*k, 254*k), (180*k, 254*k)], fill=(255, 255, 255, 255))
+# Punch the arrow out of the cloud by using it as an eraser on the white layer.
+cloud_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
+cd = ImageDraw.Draw(cloud_layer)
+cd.ellipse((120*k, cloud_y-58*k, 268*k, cloud_y+70*k), fill=white)
+cd.ellipse((198*k, cloud_y-110*k, 372*k, cloud_y+66*k), fill=white)
+cd.ellipse((300*k, cloud_y-62*k, 414*k, cloud_y+72*k), fill=white)
+cd.rounded_rectangle((126*k, cloud_y+8*k, 402*k, cloud_y+74*k), radius=32*k, fill=white)
+# Composite arrow-hole using ImageChops for correctness.
+from PIL import ImageChops
+cloud_layer.putalpha(ImageChops.subtract(cloud_layer.getchannel('A'), arrow.getchannel('A')))
+img.alpha_composite(cloud_layer)
+
+# Recolour the carved arrow with the brand gradient.
+arrow_layer = Image.new('RGBA', img.size, (0, 0, 0, 0))
+arrow_layer.paste(grad.resize(img.size), (0, 0))
+arrow_layer.putalpha(arrow.getchannel('A'))
+img.alpha_composite(arrow_layer)
+
+out = img.resize((S, S), Image.LANCZOS)
+out.save('assets/img/logo.png', optimize=True)
+out.resize((180, 180), Image.LANCZOS).save('assets/img/logo-180.png', optimize=True)
+out.resize((64, 64), Image.LANCZOS).save('assets/img/favicon-64.png', optimize=True)
+# ICO with multiple sizes.
+out.save('assets/favicon.ico', sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+print('logos written')

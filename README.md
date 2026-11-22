@@ -1,1 +1,55 @@
-IyBQdXNoUGljCgrmiZPlvIDljbPnlKjnmoQgR2l0SHViIFBhZ2VzIOWbvuW6iuOAguWbvueJh+ebtOaOpeS4iuS8oOWIsOacrOS7k+W6k+eahCBgaW1hZ2VzL2Ag55uu5b2V77yM6YCa6L+HIFBhZ2VzIOeUn+aIkOWklumTvu+8jOmhtemdouaXoOmcgOWhq+WGmeS7k+W6k+OAgeWIhuaUr+aIliBUb2tlbuOAggoKIyMg5L2/55SoCgoxLiDmiZPlvIDnq5nngrnvvJo8aHR0cHM6Ly90ZWNobm9sb2d5c2F1Y2UuZ2l0aHViLmlvL1B1c2hQaWMvPgoyLiDlnKjkuIrkvKDljaHniYfpgInmi6nmoLzlvI/vvJrkv53mjIHljp/moLzlvI8gLyBXZWJQIC8gU1ZHCjMuIOaLluaLveaIlueCueWHu+S4iuS8oOWbvueJh++8iOacgOWkmiAyMCDlvKDvvIzljZXlvKAg4omkIDUwIE1C77yJCjQuIOWcqOWbvueJh+W6k+S4reaQnOe0ouOAgemihOiniOOAgeWkjeWItiBQYWdlcyDpk77mjqUgLyByYXcg6ZO+5o6lIC8gTWFya2Rvd24g5Luj56CB77yM5oiW5Yig6Zmk5Zu+54mHCgoKIyMg5Zu+54mH5qC85byP6L2s5o2iCgrkuIrkvKDml7blj6/lnKjpobXpnaLpobbpg6jpgInmi6noh6rliqjovazmjaLmoLzlvI/vvIzorr7nva7kvJrkv53lrZjlnKjlvZPliY3mtY/op4jlmajvvJoKCi0gKirkv53mjIHljp/moLzlvI8qKu+8muS4jeWBmuWkhOeQhu+8jOebtOaOpeS4iuS8oOWOn+aWh+S7tgotICoqV2ViUCoq77ya5rWP6KeI5Zmo5pys5Zyw6L2s5o2i5Li6IFdlYlDvvIjotKjph48gMC44Mu+8ie+8jOi9rOaNouWQjuWPjeiAjOabtOWkp+aXtuiHquWKqOS/neeVmeWOn+WbvgotICoqU1ZHKirvvJrkvb/nlKggSW1hZ2VUcmFjZXIg5Zyo5rWP6KeI5Zmo5pys5Zyw5YGa6aKc6Imy6YeP5YyW5o+P5pG577yM6YCC5ZCI5Zu+5qCHL+e6v+adoeWbvu+8m+eFp+eJh+exu+S4jeW7uuiuruS9v+eUqAoK6L2s5o2i5YWo6YOo5Zyo5rWP6KeI5Zmo5a6M5oiQ77yM5LiN57uP6L+H5Lu75L2V56ys5LiJ5pa55pyN5Yqh56uv44CC55+i6YeP6L2s5o2i5bqTIGB2ZW5kb3IvaW1hZ2V0cmFjZXJfdjEuMi42LmpzYCDlt7Lpmo/ku5PlupPmj5DkvpvvvIzml6DpnIDogZTnvZHliqDovb3nrKzkuInmlrnotYTmupDjgIIKCiMjIExvZ28KCmBhc3NldHMvaW1nL2xvZ28ucG5nYO+8iDUxMsOXNTEyIOmAj+aYjuiDjOaZr++8ieS4uumhueebruWbvuagh++8jOWPpuaciSBgbG9nby0xODAucG5nYO+8iEFwcGxlIFRvdWNoIEljb27vvInjgIFgZmF2aWNvbi02NC5wbmdgIOWSjCBgZmF2aWNvbi5pY29g44CC5rqQ5paH5Lu255SxIGB0b29scy9nZW5fbG9nby5weWAg55Sf5oiQ77yM6YeN5paw55Sf5oiQ5Y+q6ZyAIFBpbGxvd++8mgoKYGBgYmFzaApweXRob24zIHRvb2xzL2dlbl9sb2dvLnB5CmBgYAoKIyMg6ZO+5o6lCgotIFBhZ2VzIOmTvuaOpe+8mmBodHRwczovL3RlY2hub2xvZ3lzYXVjZS5naXRodWIuaW8vUHVzaFBpYy9pbWFnZXMv5paH5Lu2LnBuZ2AKLSByYXcg6ZO+5o6l77yaYGh0dHBzOi8vcmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbS9UZWNobm9sb2d5U2F1Y2UvUHVzaFBpYy9tYWluL2ltYWdlcy/mlofku7YucG5nYAoKPiDkuIrkvKDlkI4gcmF3IOmTvuaOpeeri+WNs+WPr+eUqO+8m1BhZ2VzIOmTvuaOpeWPr+iDvemcgOimgeWHoOWNgeenkuaJjeS8mueUn+aViOOAggoKIyMg5a6J5YWo6K+05piOCgrpobXpnaLlhoXnva7kuobnlKjkuo7lhpnlhaXmnKzku5PlupPnmoTorr/pl67ku6TniYzvvIzlm6DmraTorr/lrqLmiZPlvIDpobXpnaLljbPlj6/kuIrkvKDvvIzkuI3pnIDopoHoh6rooYzphY3nva7lr4bpkqXjgIIKCuivpeS7pOeJjOmaj+WJjeerr+aWh+S7tuWFrOW8gO+8jOS7u+S9leiuv+mXruermeeCueeahOS6uumDveiDveS4iuS8oOaIluWIoOmZpOS7k+W6k+WGheWbvueJh+OAguiLpeimgemZkOWItuadg+mZkO+8jOivt+aSpOmUgOivpeS7pOeJjOW5tuaUueeUqOW4pumJtOadg+eahOWQjuerr+S7o+eQhuOAguivt+S4jeimgeWcqOWFrOWFseeUteiEkeS4iuS9v+eUqOacrOermeeCueOAggoKIyMg5pys5Zyw5byA5Y+RCgpgYGBiYXNoCnB5dGhvbjMgLW0gaHR0cC5zZXJ2ZXIgODA4MAojIOaJk+W8gCBodHRwOi8vbG9jYWxob3N0OjgwODAKYGBgCgrpnZnmgIHmlofku7bml6DpnIDmnoTlu7rjgILpobXpnaLnm7TmjqXosIPnlKggR2l0SHViIFJFU1QgQVBJ44CCCgojIyBMaWNlbnNlCgpNSVQK
+# PushPic
+
+打开即用的 GitHub Pages 图床。图片直接上传到本仓库的 `images/` 目录，通过 Pages 生成外链，页面无需填写仓库、分支或 Token。
+
+## 使用
+
+1. 打开站点：<https://technologysauce.github.io/PushPic/>
+2. 在上传卡片选择格式：保持原格式 / WebP / SVG
+3. 拖拽或点击上传图片（最多 20 张，单张 ≤ 50 MB）
+4. 在图片库中搜索、预览、复制 Pages 链接 / raw 链接 / Markdown 代码，或删除图片
+
+
+## 图片格式转换
+
+上传时可在页面顶部选择自动转换格式，设置会保存在当前浏览器：
+
+- **保持原格式**：不做处理，直接上传原文件
+- **WebP**：浏览器本地转换为 WebP（质量 0.82），转换后反而更大时自动保留原图
+- **SVG**：使用 ImageTracer 在浏览器本地做颜色量化描摹，适合图标/线条图；照片类不建议使用
+
+转换全部在浏览器完成，不经过任何第三方服务端。矢量转换库 `vendor/imagetracer_v1.2.6.js` 已随仓库提供，无需联网加载第三方资源。
+
+## Logo
+
+`assets/img/logo.png`（512×512 透明背景）为项目图标，另有 `logo-180.png`（Apple Touch Icon）、`favicon-64.png` 和 `favicon.ico`。源文件由 `tools/gen_logo.py` 生成，重新生成只需 Pillow：
+
+```bash
+python3 tools/gen_logo.py
+```
+
+## 链接
+
+- Pages 链接：`https://technologysauce.github.io/PushPic/images/文件.png`
+- raw 链接：`https://raw.githubusercontent.com/TechnologySauce/PushPic/main/images/文件.png`
+
+> 上传后 raw 链接立即可用；Pages 链接可能需要几十秒才会生效。
+
+## 安全说明
+
+页面内置了用于写入本仓库的访问令牌，因此访客打开页面即可上传，不需要自行配置密钥。
+
+该令牌随前端文件公开，任何访问站点的人都能上传或删除仓库内图片。若要限制权限，请撤销该令牌并改用带鉴权的后端代理。请不要在公共电脑上使用本站点。
+
+## 本地开发
+
+```bash
+python3 -m http.server 8080
+# 打开 http://localhost:8080
+```
+
+静态文件无需构建。页面直接调用 GitHub REST API。
+
+## License
+
+MIT
