@@ -10,7 +10,7 @@
   <link rel="icon" type="image/x-icon" href="./assets/favicon.ico?v=3a17c9d1" />
   <link rel="apple-touch-icon" href="./assets/img/logo-180.png?v=2f5c81a4" />
   <title>PushPic · 开箱即用图床</title>
-  <link rel="stylesheet" href="./assets/style.css?v=9b4e7a21" />
+  <link rel="stylesheet" href="./assets/style.css?v=b73d5e18" />
 </head>
 <body>
   <header class="topbar">
@@ -22,6 +22,7 @@
       </div>
     </div>
     <div class="top-actions">
+      <span id="pagesBadge" class="badge">图片库</span>
       <span id="repoBadge" class="badge badge-ok">TechnologySauce/PushPic</span>
     </div>
   </header>
@@ -58,12 +59,19 @@
       <div class="card-head">
         <h2>图片库</h2>
         <div class="gallery-actions">
-          <input id="searchInput" class="input search" type="search" placeholder="搜索文件名…" aria-label="搜索文件名" />
+          <div class="search-wrap">
+            <input id="searchInput" class="input search" type="search" placeholder="搜索文件名（空格分隔多关键词）…" aria-label="搜索文件名" />
+            <button id="searchClear" class="search-clear" type="button" aria-label="清空搜索" hidden>×</button>
+          </div>
           <button id="refreshBtn" class="btn btn-ghost btn-refresh" type="button" aria-label="刷新图片库">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5"/><path d="M18.4 9A7 7 0 0 0 6.3 7.4L4 10m16 4-2.3 2.6A7 7 0 0 1 5.6 15"/></svg>
-            <span class="refresh-label">刷新</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle class="refresh-track" cx="12" cy="12" r="9"/><circle class="refresh-arc" cx="12" cy="12" r="9"/></svg>
+            <span class="refresh-text"><span class="refresh-label">刷新</span><small class="refresh-sub">点击同步</small></span>
           </button>
         </div>
+      </div>
+      <div class="gallery-toolbar">
+        <span id="resultCount" class="result-count">共 0 张</span>
+        <span id="refreshMeta" class="refresh-meta">尚未刷新</span>
       </div>
       <div id="gallery" class="gallery">
         <p class="empty">正在加载图片库…</p>
@@ -84,10 +92,11 @@
         <button class="icon-btn" type="button" data-close-preview="1" aria-label="关闭">×</button>
       </div>
       <div class="preview-body"><img id="previewImg" alt="预览" /></div>
+      <div class="preview-tip">← / → 切换图片，Esc 关闭</div>
       <div class="preview-links" id="previewLinks"></div>
     </div>
   </div>
 
-  <script src="./assets/app.js?v=6d0a9f3c"></script>
+  <script src="./assets/app.js?v=9f2c41ab"></script>
 </body>
 </html>
