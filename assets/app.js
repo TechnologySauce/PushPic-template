@@ -13,10 +13,49 @@
   var FORMAT_KEY = 'pushpic.convertFormat';
   var VECTORIZE_LIB = './vendor/imagetracer_v1.2.6.js';
 
-  var state = { files: [], page: 1, pageSize: 24, query: '' };
+  var state = { files: [], page: 1, pageSize: 24, query: '', refreshing: false, lastRefresh: 0 };
   var el = {};
+  var pendingRequests = {};  // 相同请求并发时复用同一个 Promise，避免重复打 API
+  var etagCache = {};        // url -> { etag, data }，配合 If-None-Match 走 304 省流量
 
   function $(id) { return document.getElementById(id); }
+
+  function cachedFetch(url, options, useCache) {
+    var hit = pendingRequests[url];
+    if (hit) return hit;
+    var req = (function () {
+      var opts = Object.assign({}, options || {});
+      var headers = Object.assign(apiHeaders(), opts.headers || {});
+      if (useCache && etagCache[url] && etagCache[url].etag) {
+        headers['If-None-Match'] = etagCache[url].etag;
+      }
+      opts.headers = headers;
+      return fetch(url, opts).then(function (res) {
+        if (res.status === 304 && etagCache[url]) return etagCache[url].data;
+        if (res.status === 404) { var e404 = new Error('Not Found'); e404.status = 404; throw e404; }
+        return res.json().then(function (data) {
+          if (useCache && res.ok && res.headers && res.headers.get) {
+            var etag = res.headers.get('etag');
+            if (etag) etagCache[url] = { etag: etag, data: data };
+          }
+          if (!res.ok) {
+            var err = new Error((data && data.message) || ('GitHub API ' + res.status));
+            err.status = res.status;
+            throw err;
+          }
+          return data;
+        });
+      }).finally(function () { delete pendingRequests[url]; });
+    })();
+    pendingRequests[url] = req;
+    return req;
+  }
+
+  function clearListCache() {
+    Object.keys(etagCache).forEach(function (u) {
+      if (u.indexOf('/contents/' + IMAGE_DIR) !== -1) delete etagCache[u];
+    });
+  }
 
   function getConvertFormat() {
     try {
@@ -59,21 +98,31 @@
     el.status.className = 'status' + (kind ? ' ' + kind : '');
   }
 
-  function apiFetch(url, options) {
-    return fetch(url, Object.assign({ headers: apiHeaders() }, options || {})).then(function (res) {
+  function apiFetch(url, options, attempts) {
+    var opts = Object.assign({ headers: apiHeaders() }, options || {});
+    var n = attempts == null ? 2 : attempts;
+    return fetch(url, opts).then(function (res) {
       if (res.ok) return res.json();
       return res.json().catch(function () { return {}; }).then(function (body) {
         var err = new Error(body.message || ('GitHub API ' + res.status));
         err.status = res.status;
         throw err;
       });
+    }).catch(function (err) {
+      // 网络抖动 / 5xx 自动重试一次；4xx 是明确错误，不重试。
+      if (n > 0 && (!err.status || err.status >= 500)) {
+        return new Promise(function (resolve) { setTimeout(resolve, 300); })
+          .then(function () { return apiFetch(url, opts, n - 1); });
+      }
+      throw err;
     });
   }
 
-  function listImages() {
+  function listImages(force) {
     var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
       encodePath(IMAGE_DIR) + '?ref=' + encodeURIComponent(BRANCH);
-    return apiFetch(url).then(function (data) {
+    if (force) clearListCache();
+    return cachedFetch(url, null, true).then(function (data) {
       if (!Array.isArray(data)) return [];
       return data.filter(function (item) {
         return item.type === 'file' && IMAGE_EXT.test(item.name);
@@ -305,6 +354,32 @@
     return (bytes / 1024 / 1024).toFixed(1) + ' MB';
   }
 
+  // 简易并发池：最多 limit 个任务同时跑，全部完成后按原顺序返回结果。
+  function mapLimit(items, limit, worker, onProgress) {
+    return new Promise(function (resolve) {
+      var results = new Array(items.length);
+      var next = 0, active = 0, done = 0;
+      function run() {
+        while (active < limit && next < items.length) {
+          (function (i) {
+            active++;
+            Promise.resolve().then(function () { return worker(items[i], i); })
+              .then(function (r) { results[i] = r; })
+              .catch(function (e) { results[i] = { error: e }; })
+              .then(function () {
+                active--; done++;
+                if (onProgress) onProgress(done, items.length);
+                if (done === items.length) resolve(results);
+                else run();
+              });
+          })(next++);
+        }
+      }
+      if (!items.length) resolve(results);
+      else run();
+    });
+  }
+
   function copyText(text, btn) {
     var done = function () {
       var old = btn.textContent;
@@ -371,37 +446,71 @@
       headers: jsonHeaders(),
       body: JSON.stringify({ message: 'Delete ' + file.name + ' via PushPic', sha: file.sha, branch: BRANCH })
     }).then(function () {
-      return refresh();
-    }).then(function () {
+      state.files = state.files.filter(function (f) { return f.path !== file.path; });
+      renderGallery();
       setStatus('已删除 ' + file.name, 'ok');
+      return refresh();
     }).catch(function (err) {
       btn.disabled = false;
       setStatus('删除失败：' + err.message, 'err');
     });
   }
 
-  function refresh() {
+  var refreshTimer = null;
+  function refresh(force) {
     var btn = el.refreshBtn;
     var label = btn.querySelector('.refresh-label');
-    btn.classList.remove('is-done');
+    if (state.refreshing) return state.refreshPromise;
+    var now = Date.now();
+    // 手动点击时 800ms 内的重复触发直接忽略，防止连点打爆 API。
+    if (force && now - state.lastRefresh < 800) return state.refreshPromise || Promise.resolve(state.files);
+    state.lastRefresh = now;
+    state.refreshing = true;
+    btn.disabled = true;
+    btn.classList.remove('is-done', 'is-error');
     btn.classList.add('is-loading');
     label.textContent = '刷新中';
-    return listImages().then(function (files) {
+    btn.setAttribute('aria-label', '正在刷新图片库');
+
+    state.refreshPromise = listImages(force).then(function (files) {
       state.files = files;
       renderGallery();
       btn.classList.remove('is-loading');
       btn.classList.add('is-done');
-      label.textContent = '已完成';
-      setTimeout(function () {
-        btn.classList.remove('is-done');
-        label.textContent = '刷新';
-      }, 1600);
+      label.textContent = '已更新';
+      btn.setAttribute('aria-label', '刷新成功，共 ' + files.length + ' 张图片');
+      setStatus('图片库已更新，共 ' + files.length + ' 张。', 'ok');
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(resetRefreshBtn, 1800);
+      return files;
     }).catch(function (err) {
       btn.classList.remove('is-loading');
-      label.textContent = '刷新';
+      btn.classList.add('is-error');
+      label.textContent = '重试';
+      btn.setAttribute('aria-label', '刷新失败，点击重试');
       setStatus('加载图片失败：' + err.message, 'err');
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(resetRefreshBtn, 2600);
       throw err;
+    }).then(function (r) {
+      state.refreshing = false;
+      state.refreshPromise = null;
+      return r;
+    }, function (e) {
+      state.refreshing = false;
+      state.refreshPromise = null;
+      throw e;
     });
+    return state.refreshPromise;
+  }
+
+  function resetRefreshBtn() {
+    var btn = el.refreshBtn;
+    var label = btn.querySelector('.refresh-label');
+    btn.disabled = false;
+    btn.classList.remove('is-loading', 'is-done', 'is-error');
+    label.textContent = '刷新';
+    btn.setAttribute('aria-label', '刷新图片库');
   }
 
   function baseName(file) {
@@ -423,33 +532,36 @@
     }
     if (!list.length) return;
     el.progressWrap.hidden = false;
-    var done = 0;
-    var failed = [];
     setStatus('正在处理 0/' + list.length + ' …');
-    var chain = Promise.resolve();
-    list.forEach(function (file) {
-      chain = chain.then(function () {
-        return convertFile(file, format).then(function (result) {
-          var name = uniqueName(baseName(file) + '.' + result.ext);
-          return uploadFile(file, name, result.base64, result.bytes).then(function (item) {
-            state.files.push(item);
-            done++;
-            el.progressBar.style.width = (done / list.length * 100) + '%';
-            el.progressText.textContent = done + ' / ' + list.length;
-            setStatus('正在处理 ' + done + '/' + list.length + ' …');
-          });
-        }).catch(function (err) {
-          failed.push(file.name + '（' + err.message + '）');
+    var succeeded = 0, failed = 0;
+    var failNames = [];
+
+    // 并发 4 张同时处理：转换（CPU）与上传（网络）重叠，明显快于串行。
+    return mapLimit(list, 4, function (file) {
+      return convertFile(file, format).then(function (result) {
+        var name = uniqueName(baseName(file) + '.' + result.ext);
+        return uploadFile(file, name, result.base64, result.bytes).then(function (item) {
+          state.files.push(item);
+          succeeded++;
+          renderGallery();
         });
       });
-    });
-    chain.then(function () {
-      el.progressBar.style.width = '100%';
-      var msg = '上传完成，共 ' + done + ' 张。Pages 链接可能需要几十秒生效。';
-      if (failed.length) msg += ' 失败 ' + failed.length + ' 张：' + failed.join('；');
-      setStatus(msg, failed.length ? 'err' : 'ok');
-      renderGallery();
-      return refresh();
+    }, function (done, total) {
+      el.progressBar.style.width = (done / total * 100) + '%';
+      el.progressText.textContent = done + ' / ' + total;
+      setStatus('正在处理 ' + done + '/' + total + ' …');
+    }).then(function (results) {
+      results.forEach(function (r, i) {
+        if (r && r.error) {
+          failed++;
+          failNames.push(list[i].name + '（' + r.error.message + '）');
+        }
+      });
+      var msg = '上传完成，成功 ' + succeeded + ' 张，耗时已缩短。Pages 链接可能需要几十秒生效。';
+      if (failed) msg += ' 失败 ' + failed + ' 张：' + failNames.join('；');
+      setStatus(msg, failed ? 'err' : 'ok');
+      // 后台静默刷新以对齐仓库真实状态（force 清缓存），不覆盖已显示的结果。
+      return refresh(true).catch(function () {});
     });
   }
 
@@ -489,7 +601,7 @@
     });
     el.dropzone.addEventListener('drop', function (e) { uploadFiles(e.dataTransfer.files); });
 
-    el.refreshBtn.addEventListener('click', function () { refresh().catch(function () {}); });
+    el.refreshBtn.addEventListener('click', function () { refresh(true).catch(function () {}); });
     el.searchInput.addEventListener('input', function () { state.query = el.searchInput.value; state.page = 1; renderGallery(); });
     el.prevBtn.addEventListener('click', function () { state.page--; renderGallery(); });
     el.nextBtn.addEventListener('click', function () { state.page++; renderGallery(); });
