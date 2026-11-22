@@ -84,21 +84,25 @@ python3 tools/gen_logo.py
 
 > 上传后 raw 链接立即可用；Pages 链接可能需要几十秒才会生效。
 
-## 安全架构（v2.0 起）
+## 安全架构（v2.1 起）
 
-**写入令牌不再出现在浏览器，也不在仓库前端文件里。** 这是与旧版最本质的区别。
+**写入令牌不再出现在浏览器，也不在仓库前端文件里。** 这是与旧版最本质的区别。v2.1 在此之上做了纵深加固。
 
 - **读取**：图片库列表走 GitHub 公开 API，任何人都能看，无需令牌。
-- **写入**：浏览器只向 `repository_dispatch` 提交一条上传/删除请求；真正写仓库由服务端 GitHub Actions 工作流用令牌完成。该令牌以 **libsodium sealed box（X25519 密钥交换 + XSalsa20-Poly1305 AEAD 认证加密，CSPRNG 随机 nonce）** 加密后存入 GitHub Actions Secrets，仅服务端可用，浏览器无从读取。
-- **工作流防护**：校验文件名白名单、扩展名白名单、文件大小上限，并串行执行天然的限流，防止路径穿越与滥用。
-- **浏览器持有的只是「触发令牌」**：它只用于触发工作流，无法直接读写仓库文件。泄露的最坏情况是有人触发上传请求，仍被工作流的校验与限流约束。
+- **写入**：浏览器只向 `repository_dispatch` 提交上传/删除请求；服务端 GitHub Actions 工作流用 **最小权限 `GITHUB_TOKEN`（仅 `contents: write`，按运行自动签发、用完即失效）** 写仓库。不再依赖可泄露的高权限 PAT；如需覆盖，可设置加密 Secret `PUSHPIC_TOKEN`。
+- **防重放与完整性**：每次 dispatch 带毫秒时间戳 + 16 字节随机 nonce + SHA-256 摘要，服务端校验 5 分钟时效、用恒定时间比较拒绝篡改与重放。
+- **内容校验**：服务端除文件名/扩展名白名单与大小上限外，还校验 base64 解码后的 **magic bytes**（PNG/JPEG/GIF/WebP/AVIF/BMP），拒绝伪装成图片的 HTML/JS；SVG/SVGZ 解包后过滤 `<script>`、DOCTYPE/ENTITY、事件属性与外部引用。
+- **浏览器令牌加密存储**：「触发令牌」用 WebCrypto **AES-256-GCM** 加密后存 localStorage，密钥存 sessionStorage（关闭标签即失效），页面不再有明文令牌。
+- **SVG 输出清洗**：前端矢量转换结果在落地前清除脚本、事件属性、`javascript:`/外部实体，避免上传的 SVG 在 Pages 同源域内执行脚本。
+- **严格 CSP**：`script-src 'self' 'wasm-unsafe-eval'`（禁内联脚本/eval，放行 AVIF 的 WASM）、`object-src 'none'`、`base-uri 'none'`、`frame-ancestors 'none'`，API 与图片源显式白名单。
+- **串行限流**：写入工作流串行执行，避免并发冲突并天然限流。
 
 ### 部署者必读：替换为你自己的令牌
 
 公开仓库/docs 里的令牌仅用于演示，请在自己的仓库按下面步骤配置：
 
-1. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 新建两个 Secret：
-   - `PUSHPIC_TOKEN`：一个有 `repo` 写入权限的 classic PAT（服务端写仓库用）。
+1. （可选）在 GitHub 仓库 **Settings → Secrets and variables → Actions** 新建 Secret：
+   - `PUSHPIC_TOKEN`：仅在需要覆盖默认最小权限 `GITHUB_TOKEN` 时才配置；一般无需配置。
 2. 用随仓库提供的脚本，把令牌**加密后**写入 Secrets（明文不落盘、不进 Git 历史）：
 
    ```bash
