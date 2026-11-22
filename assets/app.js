@@ -9,9 +9,19 @@
   var TOKEN = atob('Z2hwX1hBSUxNQlRDeE' + 'NwUUE5QUV0cW5hM3M5R0E1OFNCMTBHNmcwRQ==');
   var MAX_FILES = 20;
   var MAX_SIZE = 50 * 1024 * 1024;
-  var IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif|ico)$/i;
+  // 支持的输入格式（含用户列出的全部项）。*.exif 视为 TIFF 元数据格式，按 TIFF 处理。
+  var INPUT_EXTS = ('bmp jpg jpeg jpe png tif tiff gif pcx tga exif fpx svg svgz psd cdr pcd ' +
+    'dxf ufo eps ai raw wmf emf webp avif apng heic heif ico jfif jxl').split(/\s+/);
+  var INPUT_EXT_SET = INPUT_EXTS.reduce(function (m, e) { m[e] = 1; return m; }, {});
+  var IMAGE_EXT = new RegExp('\\.(' + INPUT_EXTS.join('|') + ')$', 'i');
   var FORMAT_KEY = 'pushpic.convertFormat';
   var VECTORIZE_LIB = './vendor/imagetracer_v1.2.6.js';
+  var AVIF_MODULE = './vendor/jsquash2/encode.js';
+  var TIFF_LIB = './vendor/UTIF.js';
+  // TIFF 系扩展名（含 FlashPIX/EXIF）：浏览器 <img> 打不开，用 UTIF.js 解码。
+  var TIFF_EXT = { tif: 1, tiff: 1, exif: 1, fpx: 1 };
+  // 原始相机格式扩展名各异，这些通常是 RAW；无法解码时原样上传（无损，不做错误转换）。
+  var RAW_HINT_EXT = { raw: 1, cr2: 1, cr3: 1, nef: 1, arw: 1, dng: 1, orf: 1, rw2: 1, raf: 1 };
 
   var state = { files: [], page: 1, pageSize: 24, query: '', refreshing: false, lastRefresh: 0,
     viewFiles: [], previewIndex: -1 };
@@ -66,7 +76,7 @@
   function getConvertFormat() {
     try {
       var v = localStorage.getItem(FORMAT_KEY);
-      return (v === 'webp' || v === 'svg') ? v : 'keep';
+      return (v === 'webp' || v === 'svg' || v === 'avif') ? v : 'keep';
     } catch (e) { return 'keep'; }
   }
 
@@ -329,67 +339,135 @@
     });
   }
 
+  function bytesToBase64(bytes) {
+    var chunk = 0x8000, parts = [];
+    for (var i = 0; i < bytes.length; i += chunk) {
+      parts.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunk)));
+    }
+    return btoa(parts.join(''));
+  }
+
+  // 浏览器原生 <img> 解码：覆盖 PNG/JPEG/GIF/BMP/WebP/AVIF/SVG/ICO 等大多数格式。
+  function decodeByImage(dataUrl) {
+    return new Promise(function (resolve, reject) {
+      var image = new Image();
+      image.onload = function () {
+        var w = image.naturalWidth || image.width, h = image.naturalHeight || image.height;
+        if (!w || !h) return reject(new Error('图片尺寸无效'));
+        var canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(image, 0, 0);
+        resolve(canvas.getContext('2d').getImageData(0, 0, w, h));
+      };
+      image.onerror = function () { reject(new Error('浏览器无法解码该图片格式')); };
+      image.src = dataUrl;
+    });
+  }
+
+  // TIFF / EXIF（含多页）用随仓库提供的 UTIF.js 解码首页，作为原生解码的补充。
+  function decodeTiff(arrayBuffer) {
+    return loadScript(TIFF_LIB).then(function () {
+      if (!window.UTIF) throw new Error('TIFF 解码组件不可用');
+      var ifds = UTIF.decode(arrayBuffer);
+      if (!ifds || !ifds.length) throw new Error('TIFF 文件无有效页面');
+      UTIF.decodeImage(arrayBuffer, ifds[0]);
+      var rgba = UTIF.toRGBA8(ifds[0]);
+      return new ImageData(new Uint8ClampedArray(rgba), ifds[0].width, ifds[0].height);
+    });
+  }
+
+  function decodeImageData(file, dataUrl) {
+    return decodeByImage(dataUrl).catch(function (imgErr) {
+      var ext = (file.name.match(/\.([^.]+)$/) || [, ''])[1].toLowerCase();
+      if (TIFF_EXT[ext]) {
+        return file.arrayBuffer().then(decodeTiff).catch(function () { throw imgErr; });
+      }
+      throw imgErr;
+    });
+  }
+
   // 位图转 SVG：按颜色量化后输出矢量路径，线条图/图标效果最好。
   function bitmapToSvg(file, dataUrl) {
     return loadScript(VECTORIZE_LIB).then(function () {
       if (!window.ImageTracer) throw new Error('矢量转换组件不可用');
-      return new Promise(function (resolve, reject) {
-        var image = new Image();
-        image.onload = function () {
-          try {
-            var canvas = document.createElement('canvas');
-            canvas.width = image.naturalWidth || image.width;
-            canvas.height = image.naturalHeight || image.height;
-            var ctx = canvas.getContext('2d');
-            ctx.drawImage(image, 0, 0);
-            var options = ImageTracer.checkoptions({
-              colors: 8, filterSpeckles: true, ltres: 1, qtres: 1,
-              strokewidth: 1, scale: 1, viewBox: true
-            });
-            options.pathprecision = 1;
-            var svg = ImageTracer.imagedataToSVG(ctx.getImageData(0, 0, canvas.width, canvas.height), options);
-            resolve(dataUrlToBase64('data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)));
-          } catch (err) { reject(err); }
-        };
-        image.onerror = function () { reject(new Error('无法解析图片用于矢量转换')); };
-        image.src = dataUrl;
+      return decodeImageData(file, dataUrl).then(function (imageData) {
+        var options = ImageTracer.checkoptions({
+          colors: 8, filterSpeckles: true, ltres: 1, qtres: 1,
+          strokewidth: 1, scale: 1, viewBox: true
+        });
+        options.pathprecision = 1;
+        var svg = ImageTracer.imagedataToSVG(imageData, options);
+        // ImageTracer 返回 UTF-8 字符串，需先转为UTF-8字节再 base64，否则中文/符号会损坏。
+        var utf8 = unescape(encodeURIComponent(svg));
+        return btoa(utf8);
       });
     });
   }
 
+  function canvasToAvif(imageData, quality) {
+    return import(AVIF_MODULE).then(function (mod) {
+      var encode = mod.encode || mod.default;
+      // jsquash 的 encode 需要可写的 Uint8ClampedArray 副本
+      var data = new Uint8ClampedArray(imageData.data);
+      return encode({ data: data, width: imageData.width, height: imageData.height },
+        { quality: quality == null ? 50 : quality, speed: 8 });
+    }).then(function (buffer) {
+      var bytes = new Uint8Array(buffer);
+      if (bytes.length < 12 || String.fromCharCode.apply(null, bytes.subarray(4, 8)) !== 'ftyp' ||
+          String.fromCharCode.apply(null, bytes.subarray(8, 12)) !== 'avif') {
+        throw new Error('AVIF 编码结果无效');
+      }
+      return bytesToBase64(bytes);
+    });
+  }
+
+  function fallbackOriginal(file, err) {
+    return readFile(file).then(function (orig) {
+      return { base64: orig, ext: (file.name.match(/\.([^.]+)$/) || [, 'png'])[1].toLowerCase(),
+        bytes: file.size, kept: true, note: err && err.message ? err.message : '' };
+    });
+  }
+
+  function convertToRaster(file, dataUrl, format, origSize) {
+    return decodeImageData(file, dataUrl).then(function (imageData) {
+      if (format === 'avif') {
+        return canvasToAvif(imageData, 50).then(function (base64) {
+          var bytes = Math.floor(base64.length * 3 / 4);
+          if (bytes >= origSize) return fallbackOriginal(file, new Error('转换后更大'));
+          return { base64: base64, ext: 'avif', bytes: bytes };
+        });
+      }
+      // WebP：用临时 canvas 还原 imageData 后编码。
+      var canvas = document.createElement('canvas');
+      canvas.width = imageData.width; canvas.height = imageData.height;
+      canvas.getContext('2d').putImageData(imageData, 0, 0);
+      var base64 = canvasToWebp(canvas, 0.82);
+      var bytes = Math.floor(base64.length * 3 / 4);
+      if (bytes >= origSize) return fallbackOriginal(file, new Error('转换后更大'));
+      return { base64: base64, ext: 'webp', bytes: bytes };
+    });
+  }
+
   function convertFile(file, format) {
+    var origExt = (file.name.match(/\.([^.]+)$/) || [, 'png'])[1].toLowerCase();
     if (format === 'keep') return readFile(file).then(function (base64) {
-      return { base64: base64, ext: (file.name.match(/\.([^.]+)$/) || [, 'png'])[1].toLowerCase(), bytes: file.size };
+      return { base64: base64, ext: (INPUT_EXT_SET[origExt] ? origExt : 'png'), bytes: file.size };
     });
     return blobToDataUrl(file).then(function (dataUrl) {
       if (format === 'svg') {
         return bitmapToSvg(file, dataUrl).then(function (base64) {
           return { base64: base64, ext: 'svg', bytes: Math.floor(base64.length * 3 / 4) };
-        });
+        }).catch(function () { return fallbackOriginal(file, new Error('矢量转换失败')); });
       }
-      return new Promise(function (resolve, reject) {
-        var image = new Image();
-        image.onload = function () {
-          try {
-            var canvas = document.createElement('canvas');
-            canvas.width = image.naturalWidth || image.width;
-            canvas.height = image.naturalHeight || image.height;
-            if (!canvas.width || !canvas.height) throw new Error('图片尺寸无效');
-            canvas.getContext('2d').drawImage(image, 0, 0);
-            var base64 = canvasToWebp(canvas, 0.82);
-            var bytes = Math.floor(base64.length * 3 / 4);
-            // 转换后反而更大就保留原图，仍按原扩展名上传。
-            if (bytes >= file.size && file.type !== 'image/webp') {
-              return readFile(file).then(function (orig) {
-                resolve({ base64: orig, ext: (file.name.match(/\.([^.]+)$/) || [, 'png'])[1].toLowerCase(), bytes: file.size, kept: true });
-              });
-            }
-            resolve({ base64: base64, ext: 'webp', bytes: bytes });
-          } catch (err) { reject(err); }
-        };
-        image.onerror = function () { reject(new Error('无法解码图片，可能格式不受支持')); };
-        image.src = dataUrl;
-      });
+      return convertToRaster(file, dataUrl, format, file.size)
+        .catch(function (err) {
+          // 专有/RAW/未知格式浏览器解码不了：原样上传，绝不写坏数据。
+          var hinted = RAW_HINT_EXT[origExt] || !INPUT_EXT_SET[origExt];
+          if (hinted || /解码|尺寸无效|无法解析|不可用|加载失败|失败/.test(err.message || '')) {
+            return fallbackOriginal(file, err);
+          }
+          throw err;
+        });
     });
   }
 
@@ -782,13 +860,16 @@
       el.progressText.textContent = done + ' / ' + total;
       setStatus('正在处理 ' + done + '/' + total + ' …');
     }).then(function (results) {
+      var kept = 0;
       results.forEach(function (r, i) {
+        if (r && r.kept) kept++;
         if (r && r.error) {
           failed++;
           failNames.push(list[i].name + '（' + r.error.message + '）');
         }
       });
       var msg = '上传完成，成功 ' + succeeded + ' 张。raw 链接已可用，Pages 链接上线后会自动标记。';
+      if (kept) msg += ' 其中 ' + kept + ' 张因转换失败或反而更大已保留原格式。';
       if (dedupNote) msg = dedupNote + ' ' + msg;
       if (failed) msg += ' 失败 ' + failed + ' 张：' + failNames.join('；');
       setStatus(msg, failed ? 'err' : 'ok');
@@ -806,9 +887,10 @@
     var savedFormat = getConvertFormat();
     el.formatSelect.value = savedFormat;
     var hints = {
-      keep: '按原文件上传，不做任何转换',
-      webp: '转为 WebP，通常体积更小；若转换后更大则自动保留原图',
-      svg: '转为矢量轮廓，适合图标/线条图，照片类不建议使用'
+      keep: '按原文件上传，支持 bmp/jpg/png/tif/gif/pcx/tga/exif/fpx/svg/psd/cdr/pcd/dxf/ufo/eps/ai/raw/wmf/webp/avif/apng 等 30+ 种格式',
+      webp: '浏览器本地转 WebP，通常体积更小；转换后更大或无法解码则保留原图',
+      avif: '浏览器本地转 AVIF（更高压缩率），首次使用需加载约 4.5 MB 编码组件；转换后更大则保留原图',
+      svg: '转为矢量轮廓，适合图标/线条图；照片类不建议使用'
     };
     var updateHint = function () { el.formatHint.textContent = hints[el.formatSelect.value]; };
     updateHint();
