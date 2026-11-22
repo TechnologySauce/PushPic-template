@@ -90,6 +90,8 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-si
 .tile {
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
   display: flex; flex-direction: column;
+  /* 性能：屏外卡片跳过渲染，长图库滚动/加载更流畅；占位高度保持稳定不跳动。 */
+  content-visibility: auto; contain-intrinsic-size: auto 300px;
 }
 .tile-thumb { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: #111; cursor: zoom-in; display: block; }
 .tile-meta { padding: 10px; }
@@ -234,3 +236,6 @@ code { background: var(--panel-2); padding: 1px 6px; border-radius: 5px; font-si
 
 /* 令牌设置按钮（紧凑） */
 .btn-sm { padding: 4px 10px; font-size: 12px; }
+
+/* 令牌按钮：已配置时显示成功色，一眼可见当前是否可上传。 */
+#tokenBtn.is-ready { color: var(--success); border-color: var(--success); }
