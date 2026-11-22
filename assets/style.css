@@ -11,6 +11,17 @@
   --success: #4ec9a0;
 }
 * { box-sizing: border-box; }
+
+/* 顶部致谢横条 */
+.powered-bar {
+  background: #0b0d13; color: var(--muted); text-align: center;
+  padding: 5px 12px; font-size: 12px; letter-spacing: .2px;
+  border-bottom: 1px solid var(--border);
+}
+.powered-bar a { color: var(--primary); text-decoration: none; font-weight: 600; }
+.powered-bar a:hover { color: var(--primary-hover); text-decoration: underline; }
+.powered-bar a:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 3px; }
+
 body {
   margin: 0;
   background: var(--bg);
