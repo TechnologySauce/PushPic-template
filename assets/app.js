@@ -5,8 +5,23 @@
   var OWNER_REPO = 'TechnologySauce/PushPic';
   var BRANCH = 'main';
   var IMAGE_DIR = 'images';
-  // 内置写入令牌：页面打开即可上传，无需配置。随前端文件公开，请勿在公共电脑使用。
-  var TOKEN = atob('Z2hwX1hBSUxNQlRDeE' + 'NwUUE5QUV0cW5hM3M5R0E1OFNCMTBHNmcwRQ==');
+  // 安全架构（v2.0 起）：
+  //   读取：走 GitHub 公开 API，无需任何令牌。
+  //   写入：浏览器只向 repository_dispatch 提交请求；真正写仓库由服务端 Actions
+  //         工作流用 GITHUB_TOKEN 完成，写入令牌仅以加密 Secret 存在服务端，
+  //         不再出现在任何前端文件。DISPATCH_TOKEN 仅用于触发工作流，
+  //         其权限可被限制为单个仓库的 Actions 触发，泄露也无法直接读写文件。
+  //   部署者请在部署前把 DISPATCH_TOKEN 换成自己的专用低权限令牌（见 README）。
+  var DISPATCH_TOKEN = readDispatchToken();
+  function readDispatchToken() {
+    try {
+      return localStorage.getItem('pushpic.dispatchToken') || window.PUSHPIC_DISPATCH_TOKEN || '';
+    } catch (e) { return window.PUSHPIC_DISPATCH_TOKEN || ''; }
+  }
+  function saveDispatchToken(v) {
+    try { localStorage.setItem('pushpic.dispatchToken', v); } catch (e) {}
+    DISPATCH_TOKEN = v;
+  }
   var MAX_FILES = 20;
   var MAX_SIZE = 50 * 1024 * 1024;
   // 支持的输入格式：按扩展名识别，覆盖位图/相机 RAW/矢量设计/传真/Netpbm/JPEG2000/动画等。
@@ -69,7 +84,7 @@
     if (hit) return hit;
     var req = (function () {
       var opts = Object.assign({}, options || {});
-      var headers = Object.assign(apiHeaders(), opts.headers || {});
+      var headers = Object.assign(baseHeaders(), opts.headers || {});
       if (useCache && etagCache[url] && etagCache[url].etag) {
         headers['If-None-Match'] = etagCache[url].etag;
       }
@@ -128,16 +143,22 @@
     } catch (e) { return 24; }
   }
 
-  function apiHeaders() {
+  function baseHeaders() {
     return {
-      'Authorization': 'token ' + TOKEN,
       'Accept': 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28'
     };
   }
 
-  function jsonHeaders() {
-    return Object.assign(apiHeaders(), { 'Content-Type': 'application/json' });
+  // 读取公开数据不需要令牌；仅在触发工作流时附加 DISPATCH_TOKEN。
+  function apiHeaders(authenticated) {
+    var h = baseHeaders();
+    if (authenticated && DISPATCH_TOKEN) h['Authorization'] = 'Bearer ' + DISPATCH_TOKEN;
+    return h;
+  }
+
+  function jsonHeaders(authenticated) {
+    return Object.assign(apiHeaders(authenticated), { 'Content-Type': 'application/json' });
   }
 
   function encodePath(path) { return path.split('/').map(encodeURIComponent).join('/'); }
@@ -288,7 +309,7 @@
   }
 
   function apiFetch(url, options, attempts) {
-    var opts = Object.assign({ headers: apiHeaders() }, options || {});
+    var opts = Object.assign({ headers: baseHeaders() }, options || {});
     var n = attempts == null ? 2 : attempts;
     return fetch(url, opts).then(function (res) {
       if (res.ok) return res.json();
@@ -304,6 +325,35 @@
           .then(function () { return apiFetch(url, opts, n - 1); });
       }
       throw err;
+    });
+  }
+
+  // 触发服务端 Actions 工作流：浏览器只提交请求，不直接接触写入令牌。
+  function dispatchWrite(eventType, payload) {
+    if (!DISPATCH_TOKEN) {
+      return Promise.reject(new Error('未配置 DISPATCH_TOKEN：请在部署时提供仅用于触发工作流的低权限令牌（见 README）。'));
+    }
+    var url = 'https://api.github.com/repos/' + OWNER_REPO + '/dispatches';
+    return apiFetch(url, {
+      method: 'POST',
+      headers: jsonHeaders(true),
+      body: JSON.stringify({ event_type: eventType, client_payload: payload })
+    }, 1); // 不重试 dispatches，避免重复写入
+  }
+
+  // 工作流异步执行，轮询 raw 链接直到文件真正出现（或超时）。
+  function waitForPublished(path, wantPresent, tries) {
+    var url = rawUrl(path) + '?t=' + Date.now();
+    return fetch(url, { method: 'GET', cache: 'no-store' }).then(function (res) {
+      var present = res.ok;
+      if (present === wantPresent) return true;
+      if ((tries || 0) <= 0) return false;
+      return new Promise(function (r) { setTimeout(r, 1500); })
+        .then(function () { return waitForPublished(path, wantPresent, (tries || 0) - 1); });
+    }).catch(function () {
+      if ((tries || 0) <= 0) return false;
+      return new Promise(function (r) { setTimeout(r, 1500); })
+        .then(function () { return waitForPublished(path, wantPresent, (tries || 0) - 1); });
     });
   }
 
@@ -516,32 +566,29 @@
     });
   }
 
+  // 写入改为服务端 Actions 工作流：浏览器只发 dispatch，不含任何写入令牌。
   function uploadFile(file, name, content, bytes) {
-    var path = IMAGE_DIR + '/' + name;
-    var contentsUrl = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' + encodePath(path);
-    return Promise.resolve(content).then(function (content) {
-      // Contents API 新建文件必须提供 base64 的 content；缺字段会得到 422 content wasn't supplied。
-      if (typeof content !== 'string' || !content.length) {
-        throw new Error('文件 ' + name + ' 未生成有效内容，已取消上传');
-      }
-      var body = {
-        message: 'Upload ' + name + ' via PushPic',
-        branch: BRANCH,
-        content: content
-      };
-      var payload = JSON.stringify(body);
-      if (!JSON.parse(payload).hasOwnProperty('content')) {
-        throw new Error('上传请求缺少 content 字段，已取消');
-      }
-      return apiFetch(contentsUrl, { method: 'PUT', headers: jsonHeaders(), body: payload });
-    }).then(function (res) {
-      return {
-        name: name,
-        path: res.content.path,
-        sha: res.content.sha,
-        size: bytes != null ? bytes : file.size,
-        raw: res.content.download_url || rawUrl(res.content.path)
-      };
+    if (typeof content !== 'string' || !content.length) {
+      return Promise.reject(new Error('文件 ' + name + ' 未生成有效内容，已取消上传'));
+    }
+    // 同名覆盖时需要 sha（工作流更新文件需要）；公开 API 读取，无需令牌。
+    var lookup = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
+      encodePath(IMAGE_DIR + '/' + name) + '?ref=' + encodeURIComponent(BRANCH);
+    return cachedFetch(lookup, null, false).then(function (existing) {
+      return (existing && existing.sha ? existing.sha : '');
+    }).catch(function () { return ''; }).then(function (sha) {
+      return dispatchWrite('pushpic-upload', { name: name, content: content, sha: sha })
+        .then(function () { return waitForPublished(IMAGE_DIR + '/' + name, true, 30); })
+        .then(function (ok) {
+          if (!ok) throw new Error('已提交到工作流，但文件暂未上线，请稍后刷新');
+          return {
+            name: name,
+            path: IMAGE_DIR + '/' + name,
+            sha: sha,
+            size: bytes != null ? bytes : file.size,
+            raw: rawUrl(IMAGE_DIR + '/' + name)
+          };
+        });
     });
   }
 
@@ -799,16 +846,21 @@
   function deleteFile(file, btn) {
     if (!window.confirm('确定删除 ' + file.name + '？')) return;
     btn.disabled = true;
-    var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' + encodePath(file.path);
-    apiFetch(url, {
-      method: 'DELETE',
-      headers: jsonHeaders(),
-      body: JSON.stringify({ message: 'Delete ' + file.name + ' via PushPic', sha: file.sha, branch: BRANCH })
+    // 删除同样走服务端工作流；sha 从 state 或公开 API 获取。
+    var shaReady = file.sha ? Promise.resolve(file.sha)
+      : cachedFetch('https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
+          encodePath(file.path) + '?ref=' + encodeURIComponent(BRANCH), null, false)
+          .then(function (d) { return d.sha; });
+    shaReady.then(function (sha) {
+      if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('无法获取文件 sha');
+      return dispatchWrite('pushpic-delete', { name: file.name, sha: sha })
+        .then(function () { return waitForPublished(file.path, false, 20); });
     }).then(function () {
       state.files = state.files.filter(function (f) { return f.path !== file.path; });
       renderGallery();
       setStatus('已删除 ' + file.name, 'ok');
-      return refresh();
+      clearListCache();
+      return refresh(true);
     }).catch(function (err) {
       btn.disabled = false;
       setStatus('删除失败：' + err.message, 'err');
