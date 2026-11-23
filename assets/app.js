@@ -25,6 +25,8 @@
     return {
       headProbe: c.headProbe !== false,
       probeTimeout: Math.max(1500, Math.min(15000, Number(c.probeTimeoutMs) || 6000)),
+      probeConcurrency: Math.max(1, Math.min(16, Number(c.probeConcurrency) || 6)),
+      probeMissTtl: Math.max(500, Math.min(60000, Number(c.probeMissTtlMs) || 4000)),
       dedupByContent: !!c.dedupByContent,
       readyTtl: Math.max(0, Number(c.readyTtlMs) || 10 * 60 * 1000),
       listCacheTtl: Math.max(0, Number(c.listCacheTtlMs) || 3 * 60 * 1000)
@@ -98,6 +100,7 @@
         try { localStorage.setItem(TOKEN_STORE, b64url(iv) + '.' + b64url(new Uint8Array(ct))); } catch (e) {}
         try { localStorage.removeItem('pushpic.dispatchToken'); } catch (e) {}
         DISPATCH_TOKEN = v;
+        // 令牌只保留在受控变量里；不写 DOM、不进 URL、不随任何埋点/日志上报。
         if (typeof syncTokenBtn === 'function') syncTokenBtn();
         return v;
       });
@@ -151,6 +154,7 @@
   var favorites = loadFavorites();
   var el = {};
   var pendingRequests = {};  // 相同请求并发时复用同一个 Promise，避免重复打 API
+  var pendingSha = {};       // path -> Promise：同名文件的 sha 查询并发复用，减少 GET
   var etagCache = {};        // url -> { etag, data }，配合 If-None-Match 走 304 省流量
   var CACHE_TTL = POLICY.listCacheTtl; // ETag 缓存有效期，见 config.listCacheTtlMs
   var pagesReady = {};       // path -> true：图片已在 Pages 上生效
@@ -199,6 +203,10 @@
         if (res.status === 404) {
           delete etagCache[url]; // 缓存失效及时清理，避免一直用旧数据
           var e404 = new Error('Not Found'); e404.status = 404; throw e404;
+        }
+        // 命中本地副本且数据未变时直接复用，省一次 JSON.parse。
+        if (useCache && cached && cached.etag && cached.etag === (res.headers && res.headers.get ? res.headers.get('etag') : '') && cached.data) {
+          return cached.data;
         }
         return res.json().then(function (data) {
           if (useCache && res.ok && res.headers && res.headers.get) {
@@ -283,7 +291,15 @@
   function fetchWithTimeout(url, opts, ms) {
     var options = Object.assign({}, opts || {});
     var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    if (controller) options.signal = controller.signal;
+    if (controller) {
+      // 调用方自带 signal 与超时 signal 都要生效，不能互相覆盖。
+      if (options.signal) {
+        var upstream = options.signal;
+        if (upstream.aborted) controller.abort();
+        else upstream.addEventListener('abort', function () { controller.abort(); }, { once: true });
+      }
+      options.signal = controller.signal;
+    }
     // 默认 10s 超时，最长 20s；慢网悬挂不至于长期占用连接与内存。
     var timeout = Math.max(1000, Math.min(20000, ms || 10000));
     var timer = setTimeout(function () { if (controller) controller.abort(); }, timeout);
@@ -317,7 +333,7 @@
   function cacheBust() {
     var cfg = window.PUSHPIC_CONFIG || {};
     var hit = etagCache[apiPath('/contents/' + encodePath(IMAGE_DIR) + '?ref=' + encodeURIComponent(BRANCH))];
-    var etag = hit && hit.etag ? String(hit.etag).replace(/[^"\w-]/g, '') : '';
+    var etag = hit && hit.etag ? String(hit.etag).replace(/[^"\w-]/g, '').slice(0, 64) : '';
     var tag = [cfg.assetVersion || 'v1', etag].filter(Boolean).join('-');
     return tag ? encodeURIComponent(tag) : '';
   }
@@ -329,8 +345,12 @@
   // 用 Image 加载探测链接是否可用（img 跨域无需 CORS 头），加随机参数破 CDN 缓存。
   var probeCache = {};    // url -> true：本次会话内已确认可用的链接
   var probeFlights = {};  // url -> Promise：并发中的同链接探测复用，避免请求风暴
+  // 失败探测短期负缓存：刚上传未上线的链接几秒内不重复打 HEAD，避免请求风暴。
+  var probeMiss = {};     // url -> 失败时间戳
   function probeImage(url, timeout) {
     if (probeCache[url]) return Promise.resolve(true);
+    var miss = probeMiss[url];
+    if (miss && Date.now() - miss < POLICY.probeMissTtl) return Promise.resolve(false);
     if (probeFlights[url]) return probeFlights[url];
     var ms = Math.min(timeout || POLICY.probeTimeout, POLICY.probeTimeout);
     var flight = new Promise(function (resolve) {
@@ -343,7 +363,8 @@
         done = true;
         if (timer) clearTimeout(timer);
         if (img) { img.onload = img.onerror = null; img.src = ''; }
-        if (ok) probeCache[url] = true;
+        if (ok) { probeCache[url] = true; delete probeMiss[url]; }
+        else probeMiss[url] = Date.now();
         resolve(ok);
       }
       // 回退路径：<img> 加载（老浏览器 / HEAD 被 CORS 或服务端拒绝时）。
@@ -360,7 +381,7 @@
       // 且不受 <img> 的解码开销影响。github.io / raw 均返回 ACAO:*，HEAD 不触发预检。
       if (POLICY.headProbe && typeof fetch === 'function') {
         fetchWithTimeout(probeUrl, {
-          method: 'HEAD', cache: 'no-store', referrerPolicy: 'no-referrer'
+          method: 'HEAD', cache: 'default', referrerPolicy: 'no-referrer'
         }, ms).then(function (res) {
           if (res && res.ok) finish(true);
           else if (res && (res.status === 405 || res.status === 403 || res.status === 501)) viaImage();
@@ -458,7 +479,7 @@
     if (!targets.length) return Promise.resolve();
     // 单次最多探测 24 个，避免超大图库进入视口时一次性打满并发。
     targets = targets.slice(0, 24);
-    return mapLimit(targets, 6, function (f) {
+    return mapLimit(targets, POLICY.probeConcurrency, function (f) {
       if (pagesReady[f.path]) return false;
       return probeImage(displayUrl(f.path), 6000).then(function (ok) {
         probeDone[f.path] = true;
@@ -504,9 +525,18 @@
     return probeBatch(targets);
   }
 
+  var statusFrame = 0, statusPending = null;
   function setStatus(msg, kind) {
-    el.status.textContent = msg || '';
-    el.status.className = 'status' + (kind ? ' ' + kind : '');
+    statusPending = { msg: msg || '', kind: kind ? ' ' + kind : '' };
+    if (statusFrame) return;
+    // 批量上传/探测时一帧内状态可能被改多次，合并到一次 DOM 写入避免重复重排。
+    var raf = window.requestAnimationFrame || function (cb) { return setTimeout(cb, 16); };
+    statusFrame = raf(function () {
+      statusFrame = 0;
+      if (!statusPending || !el.status) return;
+      el.status.textContent = statusPending.msg;
+      el.status.className = 'status' + statusPending.kind;
+    });
   }
 
   function usingBuiltin() {
@@ -601,6 +631,11 @@
       return files;
     }).catch(function (err) {
       if (err.status === 404) return [];
+      // 网络失败/限流时回退到会话快照，离线也能看图库（仅元数据，无令牌）。
+      if (POLICY.snapshotFallback) {
+        var snap = loadListSnapshot();
+        if (snap && snap.length) { setStatus('网络异常，当前显示本机缓存的图片库。', ''); return snap; }
+      }
       throw err;
     });
   }
@@ -833,7 +868,8 @@
   // rest 合法性校验：只接受「属性名 = '值' 或 "值"」且名字/值都在白名单内。
   // 尖括号、伪协议、未知实体、控字符一律拒绝，配合解析式清洗杜绝畸形标签复活。
   function isSafeAttrChunk(rest) {
-    var r = String(rest || '').replace(/\/>$/, '');
+    // 兼容标准自闭合 <rect ... />：去掉尾部空白与斜杠再校验，避免误杀合法 SVG。
+    var r = String(rest || '').replace(/\s*\/?\s*$/, '');
     var re = /\s+([A-Za-z][\w:.-]*)\s*=\s*(?:"([^"<>]*)"|'([^'<>]*)')/g;
     var m, consumed = 0;
     while ((m = re.exec(r))) {
@@ -841,15 +877,18 @@
       var name = m[1], val = m[2] !== undefined ? m[2] : m[3];
       if (!SVG_SAFE_ATTRS.test(name)) return false;
       // 斜杠在 xmlns URL 中合法；这里只拒绝尖括号、伪协议、坏实体与事件属性。
-      if (/[<>]/i.test(val) || /\b(?:javascript|data|file)\s*:/i.test(val) ||
-          /&(?![A-Za-z#][A-Za-z0-9#]*;)/.test(val) || /\son[a-z]+\s*=/i.test(val)) return false;
+      if (/[<>\\'\"\[\]]/i.test(val) || /\b(?:javascript|data|file)\s*:/i.test(val) ||
+          /&(?!#(?:\d+|x[0-9a-f]+);|[A-Za-z][A-Za-z0-9]*;)/i.test(val) || /\son[a-z]+\s*=/i.test(val)) return false;
       consumed = re.lastIndex;
     }
-    return consumed === r.length;
+    if (consumed !== r.length) return false;
+    // 拒绝 CSS url()/表达式与未知实体，避免借 fill 等属性外链资源。
+    if (/url\s*\(/i.test(r) || /&(?!#(?:\d+|x[0-9a-f]+);|[A-Za-z][A-Za-z0-9]*;)/i.test(r)) return false;
+    return true;
   }
 
   function rebuildAttrs(rest) {
-    var r = String(rest || '').replace(/\/>$/, '');
+    var r = String(rest || '').replace(/\s*\/?\s*$/, '');
     var re = /\s+([A-Za-z][\w:.-]*)\s*=\s*(?:"([^"<>]*)"|'([^'<>]*)')/g;
     var m, out = '';
     while ((m = re.exec(r))) {
@@ -969,6 +1008,9 @@
     if (ext === 'svgz') {
       // SVGZ 必须是 gzip 流（1f 8b），否则拒绝，避免伪装。
       if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) return false;
+      // 浏览器无原生 gzip 解压；这里至少确认带 gzip 头的载荷不是裸 HTML/脚本，
+      // 真正的结构清洗在上传前由 sanitizeSvgUpload 对解压后的 SVG 完成。
+      if (/<script|<svg[\s>]/i.test(ascii(0, Math.min(bytes.length, 64)))) return false;
     }
     if (ext === 'svg' || ext === 'svgz') {
       try {
@@ -988,6 +1030,24 @@
 
   // 滥用防护：写入次数写入 localStorage，刷新页面也无法绕过滑动窗口限流。
   var WRITE_LOG_KEY = 'pushpic.writeLog';
+  // 跨标签共享限流：同源标签通过 BroadcastChannel 广播写入票据，
+  // 单靠 localStorage 各标签同时读到同一份快照、各自放行会绕过限流。
+  var writeChannel = null;
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      writeChannel = new BroadcastChannel('pushpic.writeBudget');
+      writeChannel.addEventListener('message', function (e) {
+        if (e && e.data && e.data.type === 'write') {
+          try {
+            var v = JSON.parse(localStorage.getItem(WRITE_LOG_KEY) || '[]');
+            if (!Array.isArray(v)) v = [];
+            v.push(e.data.ticket);
+            localStorage.setItem(WRITE_LOG_KEY, JSON.stringify(v));
+          } catch (err) {}
+        }
+      });
+    }
+  } catch (e) { writeChannel = null; }
   function readWriteLog() {
     try {
       var v = JSON.parse(localStorage.getItem(WRITE_LOG_KEY) || '[]');
@@ -1020,6 +1080,7 @@
     var ticket = now + '-' + Math.random().toString(36).slice(2, 8);
     log.push({ t: now, id: ticket });
     try { localStorage.setItem(WRITE_LOG_KEY, JSON.stringify(log)); } catch (e) {}
+    if (writeChannel) { try { writeChannel.postMessage({ type: 'write', ticket: { t: now, id: ticket } }); } catch (e) {} }
     return ticket;
   }
   function releaseWriteSlot(ticket) {
@@ -1041,6 +1102,9 @@
       if (!slot) {
         throw new Error('操作过于频繁，请在 ' + Math.ceil((window.PUSHPIC_CONFIG.writeWindowMs || 60000) / 1000) + ' 秒后再试（本地限流）。');
       }
+      // 内容体积上限：50MB 图片的 base64 约 67MB，超过则拒绝，避免构造超大 JSON 打爆标签页。
+      var MAX_JSON_B64 = 72 * 1024 * 1024;
+      if (content.length > MAX_JSON_B64) throw new Error('文件过大，无法通过 GitHub Contents API 上传（上限 50 MB）。');
       var url = apiPath('/contents/' + encodePath(path));
       var body = { message: 'Upload ' + path.split('/').pop() + ' via PushPic',
                    content: content, branch: BRANCH };
@@ -1081,9 +1145,15 @@
     var path = IMAGE_DIR + '/' + name;
     var known = findFile(path);
     var shaPromise = known && known.sha ? Promise.resolve(known.sha) : (function () {
-      return cachedFetch(apiPath('/contents/' + encodePath(path) + '?ref=' + encodeURIComponent(BRANCH)), null, false).then(function (existing) {
+      if (pendingSha[path]) return pendingSha[path];
+      var p = cachedFetch(apiPath('/contents/' + encodePath(path) + '?ref=' + encodeURIComponent(BRANCH)), null, false).then(function (existing) {
         return (existing && existing.sha ? existing.sha : '');
-      }).catch(function () { return ''; });
+      }).catch(function () { return ''; }).then(function (sha) {
+        delete pendingSha[path];
+        return sha;
+      });
+      pendingSha[path] = p;
+      return p;
     })();
     return shaPromise.then(function (sha) {
       var ext = (name.match(/\.([^.]+)$/) || [, ''])[1].toLowerCase();
@@ -1507,9 +1577,18 @@
   }
 
   function baseName(file) {
-    var base = (file.name.replace(/\.[^.]+$/, '') || 'image');
+    var rawFile = String(file.name || '');
+    // 拒绝路径段与控制字符：只接受纯文件名，杜绝 a/b.png / .. / 控制字符拼进仓库路径。
+    if (/[\\\/]/.test(rawFile) || rawFile.indexOf('..') !== -1 || /^[\x00-\x1f]/.test(rawFile)) {
+      throw new Error('文件名包含非法路径字符，已拒绝上传');
+    }
+    var base = (rawFile.replace(/\.[^.]+$/, '') || 'image');
     // 写入仓库的文件名只允许安全字符，防路径穿越 / 脚本名 / 控制字符。
+    // 去掉 UTF 控制/零宽字符（可伪装同形名、绕过简单过滤），再收紧字符集。
+    base = String(base).replace(/[\x00-\x1f\x7f\u200b-\u200f\u202a-\u202e\ufeff]/g, '_');
     base = base.replace(/[^A-Za-z0-9._()\- ]/g, '_').replace(/^\.+/, '').trim();
+    // NTFS 交替数据流（file.jpg:evil）在 Windows/Pages 路由上会被特殊解释。
+    base = base.replace(/:/g, '_');
     // Windows 保留设备名（含扩展名）在部分系统/工具上会被特殊解释，统一加前缀规避。
     if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(base)) base = 'img-' + base;
     // 尾部的句点和空格在 Windows 与部分 CDN 路由上会被剥掉，导致外链 404，先去掉。
@@ -1740,7 +1819,7 @@
       var hint = DISPATCH_TOKEN ? '当前已在本机配置上传令牌。' : '当前未配置上传令牌（只读模式，可浏览和下载图片）。';
       var val = window.prompt(
         hint + '\n\n设置上传令牌（仅用于对 images/ 目录读写）：\n' +
-        '• 推荐细粒度令牌：只授权 TechnologySauce/PushPic 一个仓库，权限仅 Contents: read & write\n' +
+        '• 推荐细粒度令牌：只授权本仓库一个仓库，权限仅 Contents: read & write\n' +
         '• 并设置一个较短的过期时间（如 7 天）\n\n' +
         '安全：本站不含也不公开任何令牌。你填入的令牌用 AES-256-GCM 加密，\n' +
         '只保存在你自己的浏览器（设备密钥随标签关闭失效），不上传服务器、不进仓库代码。\n' +
