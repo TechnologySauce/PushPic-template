@@ -90,30 +90,24 @@ python3 tools/gen_logo.py
 
 > 上传后 raw 链接立即可用；Pages 链接可能需要几十秒才会生效。
 
-## 安全架构（v3.1 起）
+## 安全架构（v3.2 起）
 
-先说实话：**纯静态 GitHub Pages 图床没有后端，「免配置」与「浏览器零令牌」无法同时成立。** 要写入仓库，浏览器必须持有令牌。v3.1 的设计是在这个前提下，把令牌暴露面和攻击面压到最小。
+先说实话：**纯静态 GitHub Pages 图床没有后端，「访客免配置」与「浏览器零令牌」无法同时成立。** 要写入仓库，前端必须带一枚写入凭证。v3.2 的设计是在这个前提下，把暴露面与滥用面压到最小，并移除了一切已废弃的服务端写入链路。
 
-- **读取**：图片库列表走 GitHub 公开 API，任何人都能看，无需令牌。
-- **写入**：浏览器直传 GitHub **Contents API**（PUT/DELETE）。这修复了 v2.x/v3.0 用 `repository_dispatch` 携带图片 base64 的致命缺陷——dispatch 的 `client_payload` 有约 48KB 上限，稍大的图片一律 `client_payload is too large` 上传失败。直传支持到 50MB。
-- **令牌不内置、不进仓库**：公开前端不含任何令牌。部署者/使用者在页面右上角「令牌」按钮里填入一枚仅含本仓库 Contents 读写权限的令牌即可，且应设置过期时间。
-- **令牌加密存储**：令牌用 WebCrypto **AES-256-GCM** 加密后存 localStorage，设备密钥存 sessionStorage（关闭标签即失效），页面内存与存储中均无明文。
-- **最小权限**：文档明确要求令牌只授予本仓库 Contents: read & write；经典 PAT 勾选 `public_repo`（或 `repo`），细粒度令牌仅授权单仓库。
-- **SVG 输出清洗**：前端矢量转换结果在落地前清除脚本、事件属性、`javascript:`、外部实体、`<style>`/`<use>` 外链与控制字符，避免同源 SVG 执行脚本。
-- **严格 CSP**：`script-src 'self' 'wasm-unsafe-eval'`（禁内联脚本/eval，放行 AVIF 的 WASM）、`object-src 'none'`、`base-uri 'none'`、`frame-ancestors 'none'`，API 与图片源显式白名单。
+- **读取**：图片库列表走 GitHub 公开 API；带内置令牌时可把配额从匿名 60 次/小时提升到 5000 次/小时。
+- **写入**：浏览器直传 GitHub **Contents API**（PUT/DELETE），支持 50MB。旧的 `repository_dispatch` + Actions 工作流方案已**彻底删除**——它的 `client_payload` 有约 48KB 上限，稍大的图片必然失败，且签名校验会因键序变化而失败，持续产生失败通知邮件。
+- **内置令牌受约束**：内置令牌仅在官方域名 / 本地回环解码，解码后做格式校验（前缀 + 长度），第三方域名（模板副本）自动禁用；写入只针对固定仓库 + `images/` 目录 + 文件名清洗。
+- **滥用防护**：写入次数持久化在 localStorage 的滑动窗口限流（默认 60 秒 20 次），刷新页面也无法绕过；同批内容 SHA-256 去重。
+- **SVG XSS 清洗**：所有 SVG（转换生成 + 原样上传）在落地前清除脚本、事件属性、`javascript:`、外部实体、`<style>`/`<use>` 外链与控制字符，避免在 Pages 同源域内执行脚本。
 - **内容校验**：上传前用 magic bytes 校验图片头，拒绝伪装成图片的 HTML/JS；扩展名白名单 + 大小上限双保险。
-- **防重复与限流**：同批内容用 SHA-256 去重，并发上传限 4，避免打爆 API。
-- **规范化签名工具**：前后端共用「对象键递归排序、数组保序」的规范化与 SHA-256 签名，供扩展的服务端校验使用。
+- **严格 CSP**：`script-src 'self' 'wasm-unsafe-eval'`（禁用内联脚本/eval，放行 AVIF 的 WASM）、`object-src 'none'`、`base-uri 'none'`、`form-action 'none'`、`frame-ancestors 'none'`，API 与图片源显式白名单。
+- **令牌加密覆盖**：使用者可在右上角「令牌」用自己的令牌覆盖内置凭证，AES-256-GCM 加密存 localStorage，设备密钥存 sessionStorage（关标签即失效）。
 
-### 部署者必读：令牌配置
+> **安全提醒**：内置令牌随前端公开，任何访问者都能读写 `images/`。请为它设置最小权限 + 过期时间。最初贴在 Issue 里的旧 PAT 若仍在别处使用，请尽快在 GitHub 撤销。
 
-1. 创建一枚令牌：
-   - 细粒度令牌（推荐）：仅授权 `TechnologySauce/PushPic`，权限 `Contents: read and write`，设过期时间；
-   - 或经典 PAT：勾选 `public_repo`（私有仓库勾 `repo`），设过期时间。
-2. 打开站点，点右上角「⚙ 令牌」，粘贴令牌。它会被 AES-GCM 加密存在你的浏览器本机，不上传任何服务器。
-3. 之后即可上传/删除。换浏览器或清除数据后需重新填一次。
+## 为什么不再有 Actions 失败邮件
 
-> 重要：任何写进静态文件的令牌都是公开的。本设计不在前端内置令牌，令牌只留在各使用者本机。若要让访客免配置上传，必须引入带登录鉴权的后端代理（云函数/Serverless），把令牌留在服务端——这是纯静态架构做不到取舍。
+早期版本用 `repository_dispatch` 触发 `PushPic Secure Write` 工作流来写图片。该链路有两处致命缺陷：签名校验用非规范化 JSON（GitHub 转发时键序变化 → `Invalid request signature`），以及 `client_payload` 约 48KB 上限（稍大图片 → `client_payload is too large`）。改用直传 Contents API 后该工作流已无人调用，但文件仍留在仓库里，残留的 dispatch 请求会让它持续失败并给你发邮件。v3.2 已从主仓与模板仓**删除该工作流文件及配套脚本**，失败邮件随之停止。
 
 ## 本地开发
 
