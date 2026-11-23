@@ -17,7 +17,7 @@
     // 允许加载"可选内置令牌"的域名白名单。因为 tokenParts 为空，当前无任何内置令牌生效。
     allowedHosts: ['technologysauce.github.io', 'localhost', '127.0.0.1'],
     // 站点资源版本：作为图片链接的稳定破缓存参数，发布新版本时改这里即可。
-    assetVersion: 'f5a9c231',
+    assetVersion: 'b6e92f70',
     // 同源代理后端 opt-in：默认 false，GitHub Pages 部署直连官方 API。
     sameOriginApi: false,
     // 滥用防护：同一浏览器每 60 秒最多 N 次写入（含页面刷新，见 app.js）。
@@ -31,7 +31,13 @@
     // 已上线状态会话缓存的 TTL（毫秒），10 分钟内翻页/刷新不重复探测。
     readyTtlMs: 10 * 60 * 1000,
     // 图片库列表的会话缓存 TTL（毫秒）：重开页面先渲染缓存再对齐 API，首屏更快。
-    listCacheTtlMs: 3 * 60 * 1000
+    listCacheTtlMs: 3 * 60 * 1000,
+    // 视口内部署状态探测的最大并发数（1-16），默认 6。
+    probeConcurrency: 6,
+    // 图库列表请求失败时，是否回退到会话快照以便离线查看（默认开启）。
+    snapshotFallback: true,
+    // 探测失败负缓存 TTL（毫秒）：刚上传未上线的图片短时间内不重复打 HEAD。
+    probeMissTtlMs: 4000
   };
 
   // base64 规范性校验：解码后重新编码必须与原文一致，拒绝隐藏字符/非规范填充。
