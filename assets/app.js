@@ -1,4 +1,5 @@
-/* PushPic - 打开即用的 GitHub Pages 图床，配置内置，无需用户在页面填写。 */
+/* PushPic - 打开即用的 GitHub Pages 图床：内置受约束令牌，访客零配置上传。
+ * 写入走浏览器直传 GitHub Contents API；旧的 repository_dispatch 工作流已废弃移除。 */
 (function () {
   'use strict';
 
@@ -15,7 +16,10 @@
   var TOKEN_STORE = 'pushpic.dispatchToken.v2';
   var TOKEN_KEY = 'pushpic.deviceKey';
   var DISPATCH_TOKEN = '';
-  var tokenReady = loadDispatchToken(); // 异步解密，写入前会等待
+  var TOKEN_BLOCKED = !!window.PUSHPIC_TOKEN_BLOCKED;
+  // 零配置：内置令牌（config.js 按域名解码）是默认上传凭证；本机可另行覆盖。
+  var BUILTIN_TOKEN = window.PUSHPIC_DISPATCH_TOKEN || '';
+  var tokenReady = loadDispatchToken(); // 异步准备，写入前会等待
   function b64url(bytes) {
     return btoa(String.fromCharCode.apply(null, bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
@@ -44,17 +48,18 @@
     try {
       var enc = localStorage.getItem(TOKEN_STORE);
       if (!enc) {
-        // 兼容旧明文存储：读取一次后迁移为加密存储。
-        var legacy = localStorage.getItem('pushpic.dispatchToken') || window.PUSHPIC_DISPATCH_TOKEN || '';
+        // 零配置：没有本机覆盖时，直接用内置令牌（若当前域名被禁用则为空）。
+        var legacy = localStorage.getItem('pushpic.dispatchToken') || '';
         if (legacy) return saveDispatchToken(legacy);
-        return Promise.resolve('');
+        DISPATCH_TOKEN = BUILTIN_TOKEN;
+        return Promise.resolve(DISPATCH_TOKEN);
       }
       return getDeviceKey().then(function (key) {
         var parts = enc.split('.');
         if (parts.length !== 2) throw new Error('bad token record');
         return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64url(parts[0]) }, key, unb64url(parts[1]));
       }).then(function (plain) { DISPATCH_TOKEN = bytesToStr(plain); if (typeof syncTokenBtn === 'function') syncTokenBtn(); return DISPATCH_TOKEN; })
-        .catch(function () { DISPATCH_TOKEN = ''; return ''; });
+        .catch(function () { DISPATCH_TOKEN = BUILTIN_TOKEN; return DISPATCH_TOKEN; });
     } catch (e) { return Promise.resolve(''); }
   }
   function saveDispatchToken(v) {
@@ -66,9 +71,9 @@
     }
     if (!v) {
       try { localStorage.removeItem(TOKEN_STORE); localStorage.removeItem('pushpic.dispatchToken'); } catch (e) {}
-      DISPATCH_TOKEN = '';
+      DISPATCH_TOKEN = BUILTIN_TOKEN;
       if (typeof syncTokenBtn === 'function') syncTokenBtn();
-      return Promise.resolve('');
+      return Promise.resolve(DISPATCH_TOKEN);
     }
     return getDeviceKey().then(function (key) {
       var iv = crypto.getRandomValues(new Uint8Array(12));
@@ -139,12 +144,12 @@
 
   function $(id) { return document.getElementById(id); }
 
-  function cachedFetch(url, options, useCache) {
+  function cachedFetch(url, options, useCache, auth) {
     var hit = pendingRequests[url];
     if (hit) return hit;
     var req = (function () {
       var opts = Object.assign({}, options || {});
-      var headers = Object.assign(baseHeaders(), opts.headers || {});
+      var headers = Object.assign(auth ? apiHeaders(true) : baseHeaders(), opts.headers || {});
       var cached = useCache ? etagCache[url] : null;
       var fresh = cached && cached.etag && (Date.now() - (cached.at || 0) < CACHE_TTL);
       if (fresh) headers['If-None-Match'] = cached.etag;
@@ -220,7 +225,7 @@
       function (err) { clearTimeout(timer); throw err; });
   }
 
-  // 读取公开数据不需要令牌；仅在触发工作流时附加 DISPATCH_TOKEN。
+  // 读取公开数据不需要令牌；写入时附加已准备好的令牌（内置或本机覆盖）。
   function apiHeaders(authenticated) {
     var h = baseHeaders();
     if (authenticated && DISPATCH_TOKEN) h['Authorization'] = 'Bearer ' + DISPATCH_TOKEN;
@@ -245,7 +250,9 @@
   }
 
   // 用 Image 加载探测链接是否可用（img 跨域无需 CORS 头），加随机参数破 CDN 缓存。
+  var probeCache = {}; // url -> true：本次会话内已确认可用的链接，避免重复探测
   function probeImage(url, timeout) {
+    if (probeCache[url]) return Promise.resolve(true);
     return new Promise(function (resolve) {
       var img = new Image();
       var done = false;
@@ -257,7 +264,7 @@
         img.onload = img.onerror = null;
         resolve(ok);
       }
-      img.onload = function () { finish(true); };
+      img.onload = function () { probeCache[url] = true; finish(true); };
       img.onerror = function () { finish(false); };
       img.src = url + (url.indexOf('?') === -1 ? '?' : '&') + '_probe=' + Date.now();
     });
@@ -378,25 +385,34 @@
     el.status.className = 'status' + (kind ? ' ' + kind : '');
   }
 
+  function usingBuiltin() {
+    try { return !localStorage.getItem(TOKEN_STORE) && !!BUILTIN_TOKEN; } catch (e) { return !!BUILTIN_TOKEN; }
+  }
+
   // 令牌按钮反映是否已配置：已配置=绿色实心，未配置=描边（只读）。
   function syncTokenBtn() {
     if (!el.tokenBtn) return;
+    var builtin = usingBuiltin();
     el.tokenBtn.classList.toggle('is-ready', !!DISPATCH_TOKEN);
-    el.tokenBtn.textContent = DISPATCH_TOKEN ? '✓ 令牌' : '⚙ 令牌';
-    el.tokenBtn.title = DISPATCH_TOKEN ? '令牌已配置（点此更换或清除）' : '未配置令牌（只读模式，点此配置）';
+    el.tokenBtn.textContent = TOKEN_BLOCKED ? '⚙ 令牌' : (builtin ? '✓ 免配置' : (DISPATCH_TOKEN ? '✓ 令牌' : '⚙ 令牌'));
+    el.tokenBtn.title = TOKEN_BLOCKED
+      ? '当前域名未启用内置令牌，点此填入自己的令牌'
+      : (usingBuiltin() ? '已启用内置上传凭证，打开即可上传（点此可改用自有令牌）'
+        : (DISPATCH_TOKEN ? '令牌已配置（点此更换或清除）' : '未配置令牌（只读模式，点此配置）'));
   }
 
-  function apiFetch(url, options, attempts, noRetry) {
+  function apiFetch(url, options, attempts, noRetry, retried) {
     var opts = Object.assign({ headers: baseHeaders() }, options || {});
     var n = noRetry ? 0 : (attempts == null ? 2 : attempts);
+    var retryIndex = retried || 0;
     return fetchWithTimeout(url, opts).then(function (res) {
-      // 204/205 无响应体（如 repository_dispatch 成功返回 204），不能调用 json()。
+      // 204/205 无响应体，不能调用 json()。
       if (res.status === 204 || res.status === 205) return {};
       if (res.ok) return res.json();
       return res.json().catch(function () { return {}; }).then(function (body) {
         var friendly = {
           401: '令牌无效或已过期（401），请点右上角「令牌」重新填写',
-          403: '令牌权限不足或被限流（403），请确认已授予 Contents 读写权限',
+          403: '写入被拒绝（403）：可能触及速率限制或权限不足，请稍后再试',
           404: '仓库或文件不存在（404）',
           409: '文件冲突（409），请刷新后重试',
           422: '请求被拒绝（422）：' + (body.message || '内容不符合要求')
@@ -408,50 +424,11 @@
     }).catch(function (err) {
       // 网络抖动 / 5xx 自动重试一次；4xx 是明确错误，不重试。
       if (n > 0 && (!err.status || err.status >= 500)) {
-        return new Promise(function (resolve) { setTimeout(resolve, 300); })
-          .then(function () { return apiFetch(url, opts, n - 1, noRetry); });
+        var waited = Math.min(1200, 300 * Math.pow(2, retryIndex));
+        return new Promise(function (resolve) { setTimeout(resolve, waited); })
+          .then(function () { return apiFetch(url, opts, n - 1, noRetry, retryIndex + 1); });
       }
       throw err;
-    });
-  }
-
-  // 规范化 JSON 与 SHA-256 签名工具：对象键递归排序、数组保序。
-  // 供测试与后续扩展（如服务端签名校验）使用，保证跨端键序一致。
-  function canonicalize(value) {
-    if (Array.isArray(value)) return value.map(canonicalize);
-    if (value && typeof value === 'object') {
-      var out = {};
-      Object.keys(value).sort().forEach(function (k) { out[k] = canonicalize(value[k]); });
-      return out;
-    }
-    return value;
-  }
-  function signPayload(obj) {
-    var body = JSON.stringify(canonicalize(obj));
-    if (!crypto || !crypto.subtle) return Promise.reject(new Error('当前环境不支持 WebCrypto，无法签名'));
-    return crypto.subtle.digest('SHA-256', strToBytes(body)).then(function (digest) {
-      return b64url(new Uint8Array(digest));
-    });
-  }
-
-  // 工作流异步执行，轮询 raw 链接直到文件真正出现（或超时）。
-  function waitForPublished(path, wantPresent, tries) {
-    var url = rawUrl(path) + '?t=' + Date.now();
-    return fetchWithTimeout(url, { method: 'GET', cache: 'no-store' }, 8000).then(function (res) {
-      var present = res.ok;
-      if (present === wantPresent) return true;
-      var left = (tries || 0);
-      if (left <= 0) return false;
-      // 指数退避：首次 400ms 快速确认，逐次翻倍，上限 2s。比固定 1.5s 更早反馈。
-      var delay = Math.min(2000, 400 * Math.pow(2, 30 - left));
-      return new Promise(function (r) { setTimeout(r, delay); })
-        .then(function () { return waitForPublished(path, wantPresent, left - 1); });
-    }).catch(function () {
-      var left = (tries || 0);
-      if (left <= 0) return false;
-      var delay = Math.min(2000, 400 * Math.pow(2, 30 - left));
-      return new Promise(function (r) { setTimeout(r, delay); })
-        .then(function () { return waitForPublished(path, wantPresent, left - 1); });
     });
   }
 
@@ -459,7 +436,10 @@
     var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
       encodePath(IMAGE_DIR) + '?ref=' + encodeURIComponent(BRANCH);
     if (force) clearListCache();
-    return cachedFetch(url, null, true).then(function (data) {
+    // 带令牌读取：配额从匿名 60/h 提到 5000/h，避免图库加载被限流 403。
+    return tokenReady.then(function () {
+      return cachedFetch(url, null, true, !!DISPATCH_TOKEN);
+    }).then(function (data) {
       if (!Array.isArray(data)) return [];
       return data.filter(function (item) {
         return item.type === 'file' && IMAGE_EXT.test(item.name);
@@ -630,6 +610,19 @@
     return out;
   }
 
+  // 上传的 SVG/SVGZ 无论走哪种格式选项，落地前都做一次 XSS 清洗。
+  // 输入是标准 base64（可能带 data: 前缀由调用方去掉）；输出为清洗后的 base64。
+  function sanitizeSvgUpload(base64, ext) {
+    try {
+      if (ext === 'svg') {
+        var text = bytesToStr(unb64url(base64.replace(/\+/g, '-').replace(/\//g, '_')));
+        var clean = sanitizeSvg(text);
+        return btoa(unescape(encodeURIComponent(clean)));
+      }
+    } catch (e) { /* 清洗失败则继续走原魔数校验，交由服务端再校验一次 */ }
+    return base64;
+  }
+
   function canvasToAvif(imageData, quality) {
     return import(AVIF_MODULE).then(function (mod) {
       var encode = mod.encode || mod.default;
@@ -680,7 +673,10 @@
   function convertFile(file, format) {
     var origExt = (file.name.match(/\.([^.]+)$/) || [, 'png'])[1].toLowerCase();
     if (format === 'keep') return readFile(file).then(function (base64) {
-      return { base64: base64, ext: (INPUT_EXT_SET[origExt] ? origExt : 'png'), bytes: file.size };
+      var ext = INPUT_EXT_SET[origExt] ? origExt : 'png';
+      // SVG 是唯一会在 Pages 同源域内以标记语言执行的格式，落地前强制清洗。
+      if (ext === 'svg') base64 = sanitizeSvgUpload(base64, ext);
+      return { base64: base64, ext: ext, bytes: file.size };
     });
     // 浏览器无法可靠解码的格式：直接原样保留，跳过解码，既省时又绝不写坏文件。
     if (PASSTHROUGH_EXT[origExt]) {
@@ -720,12 +716,37 @@
     return !(/<script|<!doctype|<html|<\?php|^mz|^\x7felf/.test(head));
   }
 
+  // 滥用防护：写入次数写入 localStorage，刷新页面也无法绕过滑动窗口限流。
+  var WRITE_LOG_KEY = 'pushpic.writeLog';
+  function readWriteLog() {
+    try {
+      var v = JSON.parse(localStorage.getItem(WRITE_LOG_KEY) || '[]');
+      return Array.isArray(v) ? v : [];
+    } catch (e) { return []; }
+  }
+  function takeWriteSlot() {
+    var cfg = window.PUSHPIC_CONFIG || {};
+    var max = cfg.writeBudget || 20;
+    var win = cfg.writeWindowMs || 60000;
+    var now = Date.now();
+    var log = readWriteLog().filter(function (t) { return now - t < win && typeof t === 'number'; });
+    if (log.length >= max) return false;
+    log.push(now);
+    try { localStorage.setItem(WRITE_LOG_KEY, JSON.stringify(log)); } catch (e) {}
+    return true;
+  }
+
   // 写入走浏览器直传 GitHub Contents API：支持大文件（<= 50MB），绕开 dispatch 的 48KB 上限。
-  // 令牌仅用于本仓库 Contents 读写，由部署者在页面一次性配置，AES-GCM 加密保存在本机。
+  // 令牌默认来自内置配置（访客零配置）；本机覆盖令牌用 AES-GCM 加密保存。
   function writeContents(path, content, sha) {
     return tokenReady.then(function () {
       if (!DISPATCH_TOKEN) {
-        throw new Error('未配置令牌：请点右上角「令牌」填入一枚仅含本仓库 Contents 读写权限的令牌。');
+        throw new Error(TOKEN_BLOCKED
+          ? '当前域名未启用内置上传令牌（模板副本需自行配置），请在右上角「令牌」填入自己的令牌。'
+          : '上传凭证尚未就绪，请稍后重试或在右上角「令牌」重新配置。');
+      }
+      if (!takeWriteSlot()) {
+        throw new Error('操作过于频繁，请在 ' + Math.ceil((window.PUSHPIC_CONFIG.writeWindowMs || 60000) / 1000) + ' 秒后再试。');
       }
       var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' + encodePath(path);
       var body = { message: 'Upload ' + path.split('/').pop() + ' via PushPic',
@@ -745,11 +766,15 @@
     }
     // 同名覆盖需要 sha（更新文件必须带）；公开 API 读取，无需令牌。
     var path = IMAGE_DIR + '/' + name;
-    var lookup = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
-      encodePath(path) + '?ref=' + encodeURIComponent(BRANCH);
-    return cachedFetch(lookup, null, false).then(function (existing) {
-      return (existing && existing.sha ? existing.sha : '');
-    }).catch(function () { return ''; }).then(function (sha) {
+    var known = findFile(path);
+    var shaPromise = known && known.sha ? Promise.resolve(known.sha) : (function () {
+      var lookup = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
+        encodePath(path) + '?ref=' + encodeURIComponent(BRANCH);
+      return cachedFetch(lookup, null, false).then(function (existing) {
+        return (existing && existing.sha ? existing.sha : '');
+      }).catch(function () { return ''; });
+    })();
+    return shaPromise.then(function (sha) {
       var ext = (name.match(/\.([^.]+)$/) || [, ''])[1].toLowerCase();
       if (!verifyMagic(content, ext)) {
         throw new Error('文件 ' + name + ' 的内容与扩展名不符，已拒绝上传（疑似伪装文件）');
@@ -865,6 +890,13 @@
     media.appendChild(star); media.appendChild(img);
     tile.appendChild(media); tile.appendChild(meta); tile.appendChild(actions);
     return tile;
+  }
+
+  var renderFrame = 0;
+  function scheduleRender() {
+    if (renderFrame) return;
+    var raf = window.requestAnimationFrame || function (cb) { return setTimeout(cb, 16); };
+    renderFrame = raf(function () { renderFrame = 0; renderGallery(); });
   }
 
   function renderGallery() {
@@ -1036,7 +1068,7 @@
   function deleteFile(file, btn) {
     if (!window.confirm('确定删除 ' + file.name + '？')) return;
     btn.disabled = true;
-    // 删除同样走服务端工作流；sha 从 state 或公开 API 获取。
+    // 删除走 Contents API；sha 从 state 或公开 API 获取。
     var shaReady = file.sha ? Promise.resolve(file.sha)
       : cachedFetch('https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
           encodePath(file.path) + '?ref=' + encodeURIComponent(BRANCH), null, false)
@@ -1044,7 +1076,7 @@
     shaReady.then(function (sha) {
       if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('无法获取文件 sha');
       return tokenReady.then(function () {
-        if (!DISPATCH_TOKEN) throw new Error('未配置令牌，无法删除');
+        if (!DISPATCH_TOKEN) throw new Error(TOKEN_BLOCKED ? '当前域名未启用内置令牌，无法删除' : '上传凭证尚未就绪，请稍后重试');
         var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' + encodePath(file.path);
         return apiFetch(url, {
           method: 'DELETE',
@@ -1088,7 +1120,7 @@
       state.files = files;
       var keep = files.reduce(function (m, f) { m[f.path] = 1; return m; }, {});
       pruneTileCache(keep);
-      renderGallery();
+      scheduleRender();
       btn.classList.remove('is-loading');
       btn.classList.add('is-done');
       label.textContent = '已更新 ' + files.length + ' 张';
@@ -1141,7 +1173,10 @@
   }
 
   function baseName(file) {
-    return (file.name.replace(/\.[^.]+$/, '') || 'image');
+    var base = (file.name.replace(/\.[^.]+$/, '') || 'image');
+    // 写入仓库的文件名只允许安全字符，防路径穿越 / 脚本名 / 控制字符。
+    base = base.replace(/[^A-Za-z0-9._()\- ]/g, '_').replace(/^\.+/, '').trim();
+    return base.slice(0, 160) || 'image';
   }
 
   // 用 Web Crypto 算内容摘要，同一批里完全相同的文件只上传一次。
@@ -1156,10 +1191,13 @@
     }).catch(function () { return ''; });
   }
 
+  var uploading = false;
   function uploadFiles(files) {
+    if (uploading) { setStatus('还有上传任务在进行中，请稍候。', 'err'); return; }
     var format = el.formatSelect.value;
     var list = Array.prototype.slice.call(files).filter(function (f) { return f.type.indexOf('image/') === 0; });
     if (!list.length) { setStatus('未选择图片文件。', 'err'); return; }
+    uploading = true;
     if (list.length > MAX_FILES) {
       setStatus('一次最多上传 ' + MAX_FILES + ' 张，已截取前 ' + MAX_FILES + ' 张。', 'err');
       list = list.slice(0, MAX_FILES);
@@ -1169,7 +1207,7 @@
       setStatus('以下文件超过 50 MB，已跳过：' + oversized.map(function (f) { return f.name; }).join('、'), 'err');
       list = list.filter(function (f) { return f.size <= MAX_SIZE; });
     }
-    if (!list.length) return;
+    if (!list.length) { uploading = false; return; }
     var dedupNote = '';
     // 内容相同的文件只传一份，重复的写入名由 uniqueName 处理（内容不同仍会另存）。
     return mapLimit(list, 8, contentDigest).then(function (digests) {
@@ -1197,7 +1235,7 @@
         return uploadFile(file, name, result.base64, result.bytes).then(function (item) {
           state.files.push(item);
           succeeded++;
-          renderGallery();
+          scheduleRender();
           // 后台探测 Pages 何时生效，未上线前复制 raw，避免用户点到 404。
           trackDeployment(item);
         });
@@ -1224,6 +1262,10 @@
       // 只清缓存，下次用户主动刷新时自然对齐仓库真实状态。
       clearListCache();
       pruneTileCache();
+      uploading = false;
+    }, function (err) {
+      uploading = false;
+      setStatus('上传过程出错：' + (err && err.message ? err.message : String(err)), 'err');
     });
     }
   }
@@ -1324,7 +1366,9 @@
 
     // 令牌设置：拥有者一次性填入「仅触发 Actions」的低权限令牌，保存在本机，不写入仓库。
     function openTokenDialog() {
-      var hint = DISPATCH_TOKEN ? '当前已配置上传令牌。' : '当前未配置上传令牌（只读模式）。';
+      var hint = usingBuiltin()
+        ? '当前使用内置上传凭证，打开即可上传，无需任何配置。'
+        : (DISPATCH_TOKEN ? '当前已配置上传令牌。' : '当前未配置上传令牌（只读模式）。');
       var val = window.prompt(
         hint + '\n\n设置上传令牌：需对本仓库有 Contents 读写权限。\n' +
         '• 经典 PAT：勾选 repo（或 public_repo + Contents 写）\n' +
@@ -1354,7 +1398,7 @@
         openPreview: openPreview, renderGallery: renderGallery, el: el,
         filteredFiles: filteredFiles, contentDigest: contentDigest, filteredCount: function () { return filteredFiles().length; },
         toggleFavorite: toggleFavorite, favorites: favorites, downloadFile: downloadFile,
-        sanitizeSvg: sanitizeSvg, signPayload: signPayload, tokenReady: tokenReady, saveDispatchToken: saveDispatchToken
+        sanitizeSvg: sanitizeSvg, tokenReady: tokenReady, saveDispatchToken: saveDispatchToken
       };
     }
   };
