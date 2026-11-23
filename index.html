@@ -9,20 +9,21 @@
   <meta name="referrer" content="strict-origin-when-cross-origin" />
   <!-- 权限收紧：图床不需要地理定位/摄像头/麦克风/支付等能力，全部关闭，压缩浏览器攻击面。 -->
   <meta http-equiv="Permissions-Policy" content="geolocation=(), camera=(), microphone=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=(), autoplay=(self)" />
-  <link rel="icon" type="image/x-icon" href="./assets/favicon.ico?v=f5a9c231" />
-  <link rel="apple-touch-icon" href="./assets/img/logo-180.png?v=f5a9c231" />
+  <link rel="icon" type="image/x-icon" href="./assets/favicon.ico?v=b6e92f70" />
+  <link rel="apple-touch-icon" href="./assets/img/logo-180.png?v=b6e92f70" />
   <title>PushPic · 开箱即用图床</title>
   <!-- 性能：提前与 API / 图片源握手，降低首次加载延迟。 -->
   <link rel="preconnect" href="https://api.github.com" crossorigin />
   <link rel="preconnect" href="https://raw.githubusercontent.com" crossorigin />
   <link rel="preconnect" href="https://technologysauce.github.io" crossorigin />
   <link rel="dns-prefetch" href="//github.com" />
-  <link rel="stylesheet" href="./assets/style.css?v=f5a9c231" />
+  <link rel="preload" as="style" href="./assets/style.css?v=b6e92f70" />
+  <link rel="stylesheet" href="./assets/style.css?v=b6e92f70" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <img class="brand-mark" src="./assets/img/logo-180.png?v=f5a9c231" alt="PushPic logo" />
+      <img class="brand-mark" src="./assets/img/logo-180.png?v=b6e92f70" alt="PushPic logo" />
       <div>
         <h1>PushPic</h1>
         <p>Simple image hosting powered by GitHub Pages</p>
@@ -121,7 +122,7 @@
     </div>
   </div>
 
-  <script src="./assets/config.js?v=f5a9c231"></script>
-  <script src="./assets/app.js?v=f5a9c231"></script>
+  <script src="./assets/config.js?v=b6e92f70"></script>
+  <script src="./assets/app.js?v=b6e92f70"></script>
 </body>
 </html>
