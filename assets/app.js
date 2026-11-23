@@ -1,23 +1,40 @@
-/* PushPic - 打开即用的 GitHub Pages 图床：内置受约束令牌，访客零配置上传。
- * 写入走浏览器直传 GitHub Contents API；旧的 repository_dispatch 工作流已废弃移除。 */
+/* PushPic - GitHub Pages 图床：前端零令牌暴露，读取免配置，写入用本机令牌。
+ * 任何放进前端的令牌都等于公开，故不再内置 PAT；写入走浏览器直传 Contents API。 */
 (function () {
   'use strict';
 
   var OWNER_REPO = 'TechnologySauce/PushPic';
   var BRANCH = 'main';
   var IMAGE_DIR = 'images';
-  // 安全架构（v3.1 起）：
-  //   读取：走 GitHub 公开 API，无需任何令牌。
-  //   写入：浏览器直传 GitHub Contents API（PUT/DELETE），绕开 dispatch 的 48KB payload 上限，
-  //         支持 50MB 大图。写入令牌由部署者配置一次，必须有本仓库 Contents 读写权限。
-  //   DISPATCH_TOKEN（沿用旧变量名）：本机用 WebCrypto AES-GCM 加密存储，
-  //   设备密钥存 sessionStorage（关闭标签即失效），密文存 localStorage，页面无明文令牌。
-  //   严格 CSP + 内容校验 + 加密存储构成纵深防御。
+  // 默认直连官方 API；只有部署者显式开启同源代理时才改走本机 /api/v1/github。
+  // 这样模板副本即使不提供后端，也仍能读取公开图片库，不会莫名其妙 404。
+  function apiBase() {
+    var cfg = window.PUSHPIC_CONFIG || {};
+    return cfg.sameOriginApi ? location.origin + '/api/v1/github' : 'https://api.github.com/repos/' + OWNER_REPO;
+  }
+  // 安全架构（v3.4 起，零令牌暴露）：
+  //   读取：走 GitHub 公开 API，无需任何令牌，打开即可浏览图库。
+  //   写入：浏览器直传 GitHub Contents API（PUT/DELETE），支持 50MB 大图。
+  //   令牌：站点不含任何内置写入凭证（config.js tokenParts 为空）。要上传/删除，
+  //         由使用者在本机填入自有令牌，WebCrypto AES-GCM 加密存 localStorage，
+  //         设备密钥存 sessionStorage（关闭标签即失效），令牌永不进入仓库代码或网络日志。
+  //   严格 CSP + 内容校验 + 加密存储 + 限流构成纵深防御。
+  // 运行时策略：config.js 冻结后以只读属性暴露，这里只读一次。
+  var POLICY = (function () {
+    var c = window.PUSHPIC_CONFIG || {};
+    return {
+      headProbe: c.headProbe !== false,
+      probeTimeout: Math.max(1500, Math.min(15000, Number(c.probeTimeoutMs) || 6000)),
+      dedupByContent: !!c.dedupByContent,
+      readyTtl: Math.max(0, Number(c.readyTtlMs) || 10 * 60 * 1000),
+      listCacheTtl: Math.max(0, Number(c.listCacheTtlMs) || 3 * 60 * 1000)
+    };
+  })();
   var TOKEN_STORE = 'pushpic.dispatchToken.v2';
   var TOKEN_KEY = 'pushpic.deviceKey';
   var DISPATCH_TOKEN = '';
   var TOKEN_BLOCKED = !!window.PUSHPIC_TOKEN_BLOCKED;
-  // 零配置：内置令牌（config.js 按域名解码）是默认上传凭证；本机可另行覆盖。
+  // 站点内置令牌恒为空（config.js tokenParts=[]）；仅保留变量以兼容旧引用。
   var BUILTIN_TOKEN = window.PUSHPIC_DISPATCH_TOKEN || '';
   var tokenReady = loadDispatchToken(); // 异步准备，写入前会等待
   function b64url(bytes) {
@@ -48,10 +65,10 @@
     try {
       var enc = localStorage.getItem(TOKEN_STORE);
       if (!enc) {
-        // 零配置：没有本机覆盖时，直接用内置令牌（若当前域名被禁用则为空）。
+        // 无内置令牌：未在本机配置前保持只读，绝不注入随站点分发的凭证。
         var legacy = localStorage.getItem('pushpic.dispatchToken') || '';
         if (legacy) return saveDispatchToken(legacy);
-        DISPATCH_TOKEN = BUILTIN_TOKEN;
+        DISPATCH_TOKEN = BUILTIN_TOKEN; // 默认空字符串
         return Promise.resolve(DISPATCH_TOKEN);
       }
       return getDeviceKey().then(function (key) {
@@ -59,19 +76,19 @@
         if (parts.length !== 2) throw new Error('bad token record');
         return crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64url(parts[0]) }, key, unb64url(parts[1]));
       }).then(function (plain) { DISPATCH_TOKEN = bytesToStr(plain); if (typeof syncTokenBtn === 'function') syncTokenBtn(); return DISPATCH_TOKEN; })
-        .catch(function () { DISPATCH_TOKEN = BUILTIN_TOKEN; return DISPATCH_TOKEN; });
+        .catch(function () { DISPATCH_TOKEN = BUILTIN_TOKEN; return DISPATCH_TOKEN; }); // 回退也仅为空
     } catch (e) { return Promise.resolve(''); }
   }
   function saveDispatchToken(v) {
     v = String(v || '').trim();
     // 直传 Contents API 需要写权限。接受经典 PAT（ghp_）与细粒度令牌（github_pat_），
     // 但明确提示最小权限原则：只授予本仓库 Contents 读写，且设置过期时间。
-    if (v && !/^(gh[pousr]_|github_pat_)/.test(v)) {
-      return Promise.reject(new Error('令牌格式不正确：应为 ghp_（经典）或 github_pat_（细粒度）开头。请授予本仓库 Contents 读写权限并设置过期时间。'));
+    if (v && !/^(?:gh[pousr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{20,255})$/.test(v)) {
+      return Promise.reject(new Error('令牌格式不正确：应为 ghp_（经典）或 github_pat_（细粒度）开头的合法令牌。请授予本仓库 Contents 读写权限并设置过期时间。'));
     }
     if (!v) {
       try { localStorage.removeItem(TOKEN_STORE); localStorage.removeItem('pushpic.dispatchToken'); } catch (e) {}
-      DISPATCH_TOKEN = BUILTIN_TOKEN;
+      DISPATCH_TOKEN = BUILTIN_TOKEN; // 清空后回到只读（无内置令牌）
       if (typeof syncTokenBtn === 'function') syncTokenBtn();
       return Promise.resolve(DISPATCH_TOKEN);
     }
@@ -135,10 +152,33 @@
   var el = {};
   var pendingRequests = {};  // 相同请求并发时复用同一个 Promise，避免重复打 API
   var etagCache = {};        // url -> { etag, data }，配合 If-None-Match 走 304 省流量
-  var CACHE_TTL = 60 * 1000; // ETag 缓存 60 秒内有效，过期强制回源
-  var pagesReady = {};       // path -> true/false：图片是否已在 Pages 上生效
+  var CACHE_TTL = POLICY.listCacheTtl; // ETag 缓存有效期，见 config.listCacheTtlMs
+  var pagesReady = {};       // path -> true：图片已在 Pages 上生效
   var probeDone = {};        // path -> true：本次会话已探测过，避免重复请求
   var deployTimers = {};     // path -> timer：后台部署探测计时器
+  // 已在 Pages 上生效的图片在本次标签会话内缓存到 sessionStorage，
+  // 翻页/刷新不必对每张图重复发探测请求；带 TTL 避免状态长期失真。
+  var READY_STORE = 'pushpic.pagesReady.v2';
+  var READY_TTL = POLICY.readyTtl;
+  function loadReadyState() {
+    try {
+      var v = JSON.parse(sessionStorage.getItem(READY_STORE) || '{}');
+      var now = Date.now();
+      var fresh = {};
+      Object.keys(v).forEach(function (p) {
+        if (v[p] && now - v[p] < READY_TTL) { pagesReady[p] = true; fresh[p] = v[p]; }
+      });
+      // 顺手丢弃过期条目，避免 sessionStorage 无限增长。
+      try { sessionStorage.setItem(READY_STORE, JSON.stringify(fresh)); } catch (e2) {}
+    } catch (e) {}
+  }
+  function persistReady(path) {
+    try {
+      var v = JSON.parse(sessionStorage.getItem(READY_STORE) || '{}');
+      v[path] = Date.now();
+      sessionStorage.setItem(READY_STORE, JSON.stringify(v));
+    } catch (e) {}
+  }
   var PROBE_INTERVAL = 3000;
   var PROBE_MAX = 24;        // 最多探测约 72 秒
 
@@ -156,7 +196,10 @@
       opts.headers = headers;
       return fetchWithTimeout(url, opts).then(function (res) {
         if (res.status === 304 && etagCache[url]) return etagCache[url].data;
-        if (res.status === 404) { var e404 = new Error('Not Found'); e404.status = 404; throw e404; }
+        if (res.status === 404) {
+          delete etagCache[url]; // 缓存失效及时清理，避免一直用旧数据
+          var e404 = new Error('Not Found'); e404.status = 404; throw e404;
+        }
         return res.json().then(function (data) {
           if (useCache && res.ok && res.headers && res.headers.get) {
             var etag = res.headers.get('etag');
@@ -179,6 +222,27 @@
     Object.keys(etagCache).forEach(function (u) {
       if (u.indexOf('/contents/' + IMAGE_DIR) !== -1) delete etagCache[u];
     });
+  }
+
+  // 图片库快照会话缓存：重新打开页面时可先渲染一帧，再与 GitHub API 对齐。
+  // 只存结构化图片元数据（名称/sha/大小/链接），不存任何令牌或敏感信息。
+  var LIST_SNAPSHOT_KEY = 'pushpic.listSnapshot.v1';
+  function saveListSnapshot(files) {
+    try {
+      var slim = files.map(function (f) {
+        return { name: f.name, path: f.path, sha: f.sha, size: f.size };
+      });
+      sessionStorage.setItem(LIST_SNAPSHOT_KEY, JSON.stringify({ at: Date.now(), files: slim }));
+    } catch (e) {}
+  }
+  function loadListSnapshot() {
+    try {
+      var v = JSON.parse(sessionStorage.getItem(LIST_SNAPSHOT_KEY) || '{}');
+      if (!v || !Array.isArray(v.files) || Date.now() - (v.at || 0) > POLICY.listCacheTtl) return null;
+      return v.files.map(function (f) {
+        return { name: f.name, path: f.path, sha: f.sha, size: f.size, raw: rawUrl(f.path) };
+      }).filter(function (f) { return f.path && IMAGE_EXT.test(f.name); });
+    } catch (e) { return null; }
   }
 
   function getConvertFormat() {
@@ -220,7 +284,9 @@
     var options = Object.assign({}, opts || {});
     var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
     if (controller) options.signal = controller.signal;
-    var timer = setTimeout(function () { if (controller) controller.abort(); }, ms || 12000);
+    // 默认 10s 超时，最长 20s；慢网悬挂不至于长期占用连接与内存。
+    var timeout = Math.max(1000, Math.min(20000, ms || 10000));
+    var timer = setTimeout(function () { if (controller) controller.abort(); }, timeout);
     return fetch(url, options).then(function (res) { clearTimeout(timer); return res; },
       function (err) { clearTimeout(timer); throw err; });
   }
@@ -238,35 +304,74 @@
 
   function encodePath(path) { return path.split('/').map(encodeURIComponent).join('/'); }
 
-  function pagesBase() {
-    var parts = OWNER_REPO.split('/');
-    return 'https://' + parts[0].toLowerCase() + '.github.io/' + parts[1] + '/';
+  // GitHub 官方 API 与同源代理共用一套相对路径，避免多处硬编码。
+  function apiPath(path) { return apiBase() + path; }
+
+  // 同源 URL：站点与图片都在 Pages 域下，复用已建立的 DNS/TLS 连接，也不硬编码仓库地址。
+  function displayUrl(path) {
+    try { return new URL(encodePath(path), document.baseURI || './').href; }
+    catch (e) { return (document.baseURI || './').replace(/\/?$/, '/') + encodePath(path); }
   }
 
-  function displayUrl(path) { return pagesBase() + encodePath(path); }
+  // 破缓存参数取「站点资产版本 + 列表 ETag」，稳定且会随发布变化，避免每次随机参数打碎 CDN 缓存。
+  function cacheBust() {
+    var cfg = window.PUSHPIC_CONFIG || {};
+    var hit = etagCache[apiPath('/contents/' + encodePath(IMAGE_DIR) + '?ref=' + encodeURIComponent(BRANCH))];
+    var etag = hit && hit.etag ? String(hit.etag).replace(/[^"\w-]/g, '') : '';
+    var tag = [cfg.assetVersion || 'v1', etag].filter(Boolean).join('-');
+    return tag ? encodeURIComponent(tag) : '';
+  }
 
   function rawUrl(path) {
     return 'https://raw.githubusercontent.com/' + OWNER_REPO + '/' + BRANCH + '/' + encodePath(path);
   }
 
   // 用 Image 加载探测链接是否可用（img 跨域无需 CORS 头），加随机参数破 CDN 缓存。
-  var probeCache = {}; // url -> true：本次会话内已确认可用的链接，避免重复探测
+  var probeCache = {};    // url -> true：本次会话内已确认可用的链接
+  var probeFlights = {};  // url -> Promise：并发中的同链接探测复用，避免请求风暴
   function probeImage(url, timeout) {
     if (probeCache[url]) return Promise.resolve(true);
-    return new Promise(function (resolve) {
-      var img = new Image();
+    if (probeFlights[url]) return probeFlights[url];
+    var ms = Math.min(timeout || POLICY.probeTimeout, POLICY.probeTimeout);
+    var flight = new Promise(function (resolve) {
       var done = false;
-      var timer = setTimeout(function () { finish(false); }, timeout || 6000);
+      var img = null, timer = null;
+      var v = cacheBust() || String(Date.now());
+      var probeUrl = url + (url.indexOf('?') === -1 ? '?' : '&') + '_probe=' + encodeURIComponent(v);
       function finish(ok) {
         if (done) return;
         done = true;
-        clearTimeout(timer);
-        img.onload = img.onerror = null;
+        if (timer) clearTimeout(timer);
+        if (img) { img.onload = img.onerror = null; img.src = ''; }
+        if (ok) probeCache[url] = true;
         resolve(ok);
       }
-      img.onload = function () { probeCache[url] = true; finish(true); };
-      img.onerror = function () { finish(false); };
-      img.src = url + (url.indexOf('?') === -1 ? '?' : '&') + '_probe=' + Date.now();
+      // 回退路径：<img> 加载（老浏览器 / HEAD 被 CORS 或服务端拒绝时）。
+      // 只下载一张已缓存的小图，作为最后的确认手段。
+      function viaImage() {
+        img = new Image();
+        img.referrerPolicy = 'no-referrer';
+        timer = setTimeout(function () { finish(false); }, ms);
+        img.onload = function () { finish(true); };
+        img.onerror = function () { finish(false); };
+        img.src = probeUrl;
+      }
+      // 主路径：HEAD 请求只取响应头，不下载图片字节。图库几十张时省下大量流量，
+      // 且不受 <img> 的解码开销影响。github.io / raw 均返回 ACAO:*，HEAD 不触发预检。
+      if (POLICY.headProbe && typeof fetch === 'function') {
+        fetchWithTimeout(probeUrl, {
+          method: 'HEAD', cache: 'no-store', referrerPolicy: 'no-referrer'
+        }, ms).then(function (res) {
+          if (res && res.ok) finish(true);
+          else if (res && (res.status === 405 || res.status === 403 || res.status === 501)) viaImage();
+          else finish(false);
+        }).catch(viaImage);
+      } else viaImage();
+    });
+    probeFlights[url] = flight;
+    return flight.then(function (ok) {
+      delete probeFlights[url];
+      return ok;
     });
   }
 
@@ -314,11 +419,23 @@
         if (ok) {
           pagesReady[path] = true;
           probeDone[path] = true;
+          persistReady(path);
           delete deployTimers[path];
           updatePagesBadge();
           setTileReady(path);
         } else if (++tries < PROBE_MAX) {
-          deployTimers[path] = setTimeout(next, PROBE_INTERVAL);
+          // 页面不可见时暂停探测，回到前台再继续，省电省流量。
+          var scheduleNext = function () {
+            deployTimers[path] = setTimeout(next, PROBE_INTERVAL);
+          };
+          if (document.hidden) {
+            delete deployTimers[path];
+            document.addEventListener('visibilitychange', function resume() {
+              if (document.hidden) return;
+              document.removeEventListener('visibilitychange', resume);
+              if (!pagesReady[path]) scheduleNext();
+            });
+          } else scheduleNext();
         } else {
           probeDone[path] = true;
           delete deployTimers[path];
@@ -339,12 +456,19 @@
 
   function probeBatch(targets) {
     if (!targets.length) return Promise.resolve();
-    return mapLimit(targets, 4, function (f) {
+    // 单次最多探测 24 个，避免超大图库进入视口时一次性打满并发。
+    targets = targets.slice(0, 24);
+    return mapLimit(targets, 6, function (f) {
+      if (pagesReady[f.path]) return false;
       return probeImage(displayUrl(f.path), 6000).then(function (ok) {
-        pagesReady[f.path] = ok;
         probeDone[f.path] = true;
+        if (ok) { pagesReady[f.path] = true; persistReady(f.path); return true; }
+        return false;
       });
-    }).then(function () { renderGallery(); updatePagesBadge(); });
+    }).then(function (changed) {
+      // 只有状态真的变了才重绘，避免每次探测都白白重排整个图库。
+      if (changed.some(Boolean)) { renderGallery(); updatePagesBadge(); }
+    });
   }
 
   function ensureTileObserver() {
@@ -386,19 +510,18 @@
   }
 
   function usingBuiltin() {
-    try { return !localStorage.getItem(TOKEN_STORE) && !!BUILTIN_TOKEN; } catch (e) { return !!BUILTIN_TOKEN; }
+    // 站点不再内置任何令牌，恒为 false；保留函数供旧调用点兼容。
+    return false;
   }
 
   // 令牌按钮反映是否已配置：已配置=绿色实心，未配置=描边（只读）。
   function syncTokenBtn() {
     if (!el.tokenBtn) return;
-    var builtin = usingBuiltin();
     el.tokenBtn.classList.toggle('is-ready', !!DISPATCH_TOKEN);
-    el.tokenBtn.textContent = TOKEN_BLOCKED ? '⚙ 令牌' : (builtin ? '✓ 免配置' : (DISPATCH_TOKEN ? '✓ 令牌' : '⚙ 令牌'));
-    el.tokenBtn.title = TOKEN_BLOCKED
-      ? '当前域名未启用内置令牌，点此填入自己的令牌'
-      : (usingBuiltin() ? '已启用内置上传凭证，打开即可上传（点此可改用自有令牌）'
-        : (DISPATCH_TOKEN ? '令牌已配置（点此更换或清除）' : '未配置令牌（只读模式，点此配置）'));
+    el.tokenBtn.textContent = DISPATCH_TOKEN ? '✓ 令牌' : '⚙ 令牌';
+    el.tokenBtn.title = DISPATCH_TOKEN
+      ? '已在本机配置上传令牌（点此更换或清除）。令牌仅存本机，不随站点公开。'
+      : '只读模式：点此填入自己的令牌即可上传。令牌 AES-GCM 加密只存本机，不进仓库。';
   }
 
   function apiFetch(url, options, attempts, noRetry, retried) {
@@ -410,15 +533,31 @@
       if (res.status === 204 || res.status === 205) return {};
       if (res.ok) return res.json();
       return res.json().catch(function () { return {}; }).then(function (body) {
+        var headers = res.headers && res.headers.get ? res.headers : null;
+        var remaining = headers ? headers.get('x-ratelimit-remaining') : null;
+        var reset = headers ? headers.get('x-ratelimit-reset') : null;
+        var retryAfter = headers ? headers.get('retry-after') : null;
         var friendly = {
           401: '令牌无效或已过期（401），请点右上角「令牌」重新填写',
-          403: '写入被拒绝（403）：可能触及速率限制或权限不足，请稍后再试',
+          403: '写入被拒绝（403）：权限不足，请检查令牌范围',
           404: '仓库或文件不存在（404）',
           409: '文件冲突（409），请刷新后重试',
           422: '请求被拒绝（422）：' + (body.message || '内容不符合要求')
         };
+        // 401 说明本机令牌失效/被撤销：清掉损坏记录回到只读，避免拿无效凭证反复重试。
+        if (res.status === 401 && DISPATCH_TOKEN) {
+          try { localStorage.removeItem(TOKEN_STORE); localStorage.removeItem('pushpic.dispatchToken'); } catch (e2) {}
+          DISPATCH_TOKEN = BUILTIN_TOKEN; // 空
+          if (typeof syncTokenBtn === 'function') syncTokenBtn();
+        }
         var err = new Error(friendly[res.status] || body.message || ('GitHub API ' + res.status));
         err.status = res.status;
+        err.remaining = remaining;
+        err.reset = reset;
+        err.retryAfter = retryAfter;
+        if (res.status === 403 && (remaining === '0' || /rate limit/i.test(body.message || ''))) {
+          err.message = rateLimitHint(err, err.message);
+        }
         throw err;
       });
     }).catch(function (err) {
@@ -432,41 +571,75 @@
     });
   }
 
+  // ETag 缓存的轻量入口：只取结构化的图片数组，命中即可在 API 请求前先渲染一帧，
+  // 弱网/慢 API 下首屏不再空白；随后 listImages 返回权威数据再对齐一次。
+  function cachedImageList() {
+    var url = apiPath('/contents/' + encodePath(IMAGE_DIR) + '?ref=' + encodeURIComponent(BRANCH));
+    var hit = etagCache[url];
+    if ((!hit || !Array.isArray(hit.data))) return loadListSnapshot();
+    return hit.data.filter(function (item) {
+      return item.type === 'file' && IMAGE_EXT.test(item.name);
+    }).map(function (item) {
+      return { name: item.name, path: item.path, sha: item.sha, size: item.size,
+               raw: item.download_url || rawUrl(item.path) };
+    }).sort(function (a, b) { return a.name.localeCompare(b.name); });
+  }
+
   function listImages(force) {
-    var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
-      encodePath(IMAGE_DIR) + '?ref=' + encodeURIComponent(BRANCH);
+    var url = apiPath('/contents/' + encodePath(IMAGE_DIR) + '?ref=' + encodeURIComponent(BRANCH));
     if (force) clearListCache();
-    // 带令牌读取：配额从匿名 60/h 提到 5000/h，避免图库加载被限流 403。
-    return tokenReady.then(function () {
-      return cachedFetch(url, null, true, !!DISPATCH_TOKEN);
-    }).then(function (data) {
+    // 读取公开仓库始终匿名：首屏不等 WebCrypto 解密（提速），也避免把本机令牌
+    // 附到列表请求上。公开 API 匿名配额足够图库浏览使用。
+    return cachedFetch(url, null, true, false).then(function (data) {
       if (!Array.isArray(data)) return [];
-      return data.filter(function (item) {
+      var files = data.filter(function (item) {
         return item.type === 'file' && IMAGE_EXT.test(item.name);
       }).map(function (item) {
         return { name: item.name, path: item.path, sha: item.sha, size: item.size, raw: item.download_url || rawUrl(item.path) };
       }).sort(function (a, b) { return a.name.localeCompare(b.name); });
+      saveListSnapshot(files);
+      return files;
     }).catch(function (err) {
       if (err.status === 404) return [];
       throw err;
     });
   }
 
+  // 同步占用集合：批量并发上传时 uniqueName 在写入前就被调用，
+  // 若只看 state.files，多个任务会算出同一名字互相覆盖。这里同步占位，杜绝竞态。
+  var claimedNames = {};
+  function claimName(name) {
+    claimedNames[name.toLowerCase()] = 1;
+  }
   function uniqueName(name) {
     var dot = name.lastIndexOf('.');
     var base = dot > 0 ? name.slice(0, dot) : name;
     var ext = dot > 0 ? name.slice(dot) : '';
-    var exists = function (n) { return state.files.some(function (f) { return f.name.toLowerCase() === n.toLowerCase(); }); };
-    if (!exists(name)) return name;
-    var i = 2;
-    while (exists(base + '-' + i + ext)) i++;
-    return base + '-' + i + ext;
+    var exists = function (n) {
+      var key = n.toLowerCase();
+      return !!claimedNames[key] || state.files.some(function (f) { return f.name.toLowerCase() === key; });
+    };
+    var chosen = name;
+    if (exists(chosen)) {
+      var i = 2;
+      while (exists(base + '-' + i + ext)) i++;
+      chosen = base + '-' + i + ext;
+    }
+    claimName(chosen);
+    return chosen;
   }
 
   function dataUrlToBase64(dataUrl) {
+    // 必须是标准 data:image/...;base64 形式，拒绝 data:text/html 等伪装载荷。
+    if (!/^data:image\/[a-z0-9.+-]+;base64,/i.test(String(dataUrl || ''))) {
+      throw new Error('文件内容格式无效（非图片 data URL）');
+    }
     var comma = String(dataUrl || '').indexOf(',');
     var base64 = comma === -1 ? '' : String(dataUrl).slice(comma + 1);
     if (!base64) throw new Error('生成的文件内容为空');
+    // base64 规范性校验：解码后再编码必须与原文一致，畸形/夹带内容直接拒绝。
+    try { if (btoa(atob(base64)) !== base64) throw new Error('bad'); }
+    catch (e) { throw new Error('文件内容编码无效，已拒绝上传'); }
     return base64;
   }
 
@@ -488,6 +661,12 @@
     else if (v === 'svg') { loadScript(VECTORIZE_LIB).catch(function () {}); }
   }
 
+  // SRI：动态注入的第三方解码/描摹脚本必须匹配随站点发布的哈希，
+  // 防止 CDN 或中间人替换脚本后在同源域内执行任意代码。哈希随文件一起发布。
+  var SRI = {
+    'UTIF.js': 'sha384-RyBmXHdfZ/Uon+ud+/AqSyWpUWnKYt2tkRG/P4gWoRUGDU+qIAV3tGBPNlYTBZEF',
+    'imagetracer_v1.2.6.js': 'sha384-YcOTH4/N9eULF5JC2kvcrQ7ZDfV1VOCErlPHqmUk77bzeZN9vJbYsi2gM8bJHgWc'
+  };
   function loadScript(src) {
     return new Promise(function (resolve, reject) {
       var existing = document.querySelector('script[data-src="' + src + '"]');
@@ -496,8 +675,13 @@
       script.src = src;
       script.async = true;
       script.dataset.src = src;
+      var integrity = SRI[src.split('/').pop()];
+      if (integrity) script.integrity = integrity; // 同源脚本，浏览器按 SRI 校验字节
       script.onload = function () { script.dataset.loaded = '1'; resolve(); };
-      script.onerror = function () { reject(new Error('矢量转换组件加载失败，请检查网络')); };
+      script.onerror = function () {
+        script.remove();
+        reject(new Error('转换组件加载失败或完整性校验未通过：' + src));
+      };
       document.head.appendChild(script);
     });
   }
@@ -583,30 +767,95 @@
   }
 
   // SVG 在 Pages 同源域内可直接渲染，必须在落地前清除脚本/事件/外部实体。
+  // 解析式清洗：逐个 <...> 标签整体处理，只重建白名单标签 + 白名单属性。
+  // 关键防御——任何无法解析/畸形/危险的标签都直接让整份 SVG 作废（fail-closed），
+  // 绝不让 <g/onload=...> 这类"斜杠粘在标签名上"的畸形标记泄漏到 DOM 被二次解析。
+  var SVG_SAFE_TAGS = /^(svg|g|path|circle|rect|line|polyline|polygon|ellipse|defs|title|desc|metadata|linearGradient|radialGradient|stop|clipPath|mask|symbol|view)$/i;
+  var SVG_DROP_TAGS = /^(script|foreignObject|iframe|object|embed|style|handler|animate|animateMotion|animateTransform|set|discard|audio|video|image|use|a|textPath|cursor|font|font-face|hatch|pattern|filter|fe[a-z]+)$/i;
+  var SVG_SAFE_ATTRS = /^(d|x|y|x1|y1|x2|y2|cx|cy|r|rx|ry|width|height|points|transform|viewBox|version|xmlns|xmlns:xlink|preserveAspectRatio|id|fill|stroke|stroke-width|stroke-linecap|stroke-linejoin|fill-opacity|stroke-opacity|opacity|fill-rule|clip-rule|gradientUnits|gradientTransform|spreadMethod|offset|stop-color|stop-opacity|clipPathUnits|maskUnits|maskContentUnits|font-family|font-size|font-style|font-weight|text-anchor|dominant-baseline|paint-order|vector-effect|stroke-dasharray|stroke-dashoffset|stroke-miterlimit|marker|class)$/i;
   function sanitizeSvg(svg) {
     var out = String(svg || '');
-    // 先整体移除危险元素（含其内部文本），杜绝 <script>alert(1)</script> 这类残留。
-    out = out.replace(/<(script|foreignObject|iframe|object|embed|style|handler)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '');
-    // 再只保留安全元素，剥离其它标签但保留其文本内容。
-    out = out.replace(/<\/?([A-Za-z][\w:-]*)([^>]*)>/g, function (m, tag, attrs) {
-      var safe = /^(svg|g|path|circle|rect|line|polyline|polygon|ellipse|defs|title|desc|metadata|linearGradient|radialGradient|stop|clipPath|mask|use|symbol|view)$/i;
-      if (!safe.test(tag)) return '';
-      // 去掉所有 on* 事件属性与 xlink:href/href 中的外部引用，以及 style 中的 expression/url(javascript:)。
-      var clean = attrs
-        .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-        .replace(/\s(?:xlink:)?href\s*=\s*(?:"(?:javascript|data|file):[^"]*"|'(?:javascript|data|file):[^']*')/gi, '')
-        .replace(/(?:url\(\s*['"]?\s*(?:javascript|data|file):[^)]*\)|expression\([^)]*\))/gi, '');
-      return '<' + (m.charAt(1) === '/' ? '/' : '') + tag + clean + '>';
-    });
-    out = out.replace(/<\?xml[^>]*\?>/gi, '').replace(/<!DOCTYPE[^>]*>/gi, '')
-             .replace(/<!ENTITY[^>]*>/gi, '').replace(/<!\[CDATA\[|\]\]>/g, '');
-    // CSS 里的 url()/import 可外带数据；<use>/<image>/<a> 的外链可指向恶意资源。
-    out = out.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, '');
-    out = out.replace(/<(?:use|image|a)\b[^>]*?(?:xlink:)?href\s*=\s*(?:"(?!#)[^"]*"|'(?!#)[^']*'|[^\s>]+)/gi, function (m) {
-      return m.replace(/(?:xlink:)?href\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i, 'href="#"');
-    });
-    // 控制字符可能用于绕过正则，直接剔除。
-    out = out.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+    // 先剔除控制字符（含 Unicode 行/段落分隔符），它们常被用来拆断属性名绕过检测。
+    out = out.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\u2028\u2029\uFFFD]/g, '');
+    // 只保留第一个 <svg ...> 到最后一个 </svg> 之间的内容，丢弃 XML 声明/DOCTYPE/实体等前导载荷。
+    var first = out.search(/<svg[\s>\/]/i);
+    var last = out.search(/<\/svg\s*>/i);
+    if (first < 0 || last < 0 || last < first) return '';
+    out = out.slice(first, last + 6);
+    var result = [];
+    var openCount = 0, closeCount = 0;
+    var re = /<\/?([A-Za-z][\w:.-]*)([\s\S]*?)(\/?)>/g;
+    var m, cursor = 0, rootOpen = 0, rootClose = 0;
+    while ((m = re.exec(out))) {
+      if (m.index > cursor) {
+        // 标签之间的文本：剥离注释/CDATA 外壳后转义，避免任何标记在二次解析时被激活。
+        var text = out.slice(cursor, m.index)
+          .replace(/<!--[\s\S]*?-->/g, '').replace(/<!\[CDATA\[|\]\]>/g, '');
+        if (/[<>]/i.test(text)) return '';
+        result.push(escapeSvgText(text));
+      }
+      cursor = re.lastIndex;
+      var isClose = m[0].charAt(1) === '/';
+      var tag = m[1], rest = m[2], selfClose = m[3] === '/';
+      // 危险元素一律作废（含其内部文本，由文本转义兜底）。
+      if (SVG_DROP_TAGS.test(tag)) return '';
+      if (!SVG_SAFE_TAGS.test(tag)) return '';
+      // 关键：rest 必须只由「空白 + 合规属性」组成。
+      // 任何紧粘的单斜杠（<g/onload=>）、双斜杠、孤立引号/尖括号都会让正则匹配失败 -> 整份作废。
+      if (!isClose && !isSafeAttrChunk(rest)) return '';
+      if (isClose) {
+        closeCount++;
+        if (/^svg$/i.test(tag)) rootClose++;
+        result.push('</' + tag + '>');
+      } else {
+        openCount++;
+        if (/^svg$/i.test(tag) && !selfClose) rootOpen++;
+        result.push('<' + tag + (isClose ? '' : rebuildAttrs(rest)) + (selfClose ? '/>' : '>'));
+      }
+    }
+    if (cursor < out.length) {
+      var tail = out.slice(cursor).replace(/<!--[\s\S]*?-->/g, '');
+      if (/[<>]/i.test(tail)) return '';
+      result.push(escapeSvgText(tail));
+    }
+    // 必须恰好一个 <svg> 根，且开闭数量一致，杜绝嵌套/断裂结构。
+    if (rootOpen !== 1 || rootClose !== 1 || !/^<svg[\s>]/.test(result[0] || '')) return '';
+    if (/<\?|<!DOCTYPE|<!ENTITY/i.test(out)) return ''; // 处理指令/实体声明一律作废
+    var clean = result.join('');
+    // 二次兜底扫描：只要还有事件属性/伪协议/危险标签，一律作废。
+    if (/\son[a-z]+\s*=/i.test(clean) || /(?:javascript|data|file)\s*:/i.test(clean) ||
+        /<\/?(?:script|foreignObject|iframe|object|embed|handler|style|animate|set)\b/i.test(clean)) return '';
+    return clean;
+  }
+  function escapeSvgText(t) {
+    return String(t).replace(/&(?![A-Za-z#][A-Za-z0-9#]*;)/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  // rest 合法性校验：只接受「属性名 = '值' 或 "值"」且名字/值都在白名单内。
+  // 尖括号、伪协议、未知实体、控字符一律拒绝，配合解析式清洗杜绝畸形标签复活。
+  function isSafeAttrChunk(rest) {
+    var r = String(rest || '').replace(/\/>$/, '');
+    var re = /\s+([A-Za-z][\w:.-]*)\s*=\s*(?:"([^"<>]*)"|'([^'<>]*)')/g;
+    var m, consumed = 0;
+    while ((m = re.exec(r))) {
+      if (m.index !== consumed) return false; // 有任何不可解析的残渣 => 作废
+      var name = m[1], val = m[2] !== undefined ? m[2] : m[3];
+      if (!SVG_SAFE_ATTRS.test(name)) return false;
+      // 斜杠在 xmlns URL 中合法；这里只拒绝尖括号、伪协议、坏实体与事件属性。
+      if (/[<>]/i.test(val) || /\b(?:javascript|data|file)\s*:/i.test(val) ||
+          /&(?![A-Za-z#][A-Za-z0-9#]*;)/.test(val) || /\son[a-z]+\s*=/i.test(val)) return false;
+      consumed = re.lastIndex;
+    }
+    return consumed === r.length;
+  }
+
+  function rebuildAttrs(rest) {
+    var r = String(rest || '').replace(/\/>$/, '');
+    var re = /\s+([A-Za-z][\w:.-]*)\s*=\s*(?:"([^"<>]*)"|'([^'<>]*)')/g;
+    var m, out = '';
+    while ((m = re.exec(r))) {
+      var name = m[1], val = m[2] !== undefined ? m[2] : m[3];
+      out += ' ' + name + '="' + val + '"';
+    }
     return out;
   }
 
@@ -617,6 +866,8 @@
       if (ext === 'svg') {
         var text = bytesToStr(unb64url(base64.replace(/\+/g, '-').replace(/\//g, '_')));
         var clean = sanitizeSvg(text);
+        // 清洗后为空说明载荷危险/畸形，直接拒绝写入而不是上传空图。
+        if (!clean) throw new Error('SVG 含不安全内容，已拒绝上传');
         return btoa(unescape(encodeURIComponent(clean)));
       }
     } catch (e) { /* 清洗失败则继续走原魔数校验，交由服务端再校验一次 */ }
@@ -708,8 +959,27 @@
       avif: function () { return ascii(4, 8) === 'ftyp' && /^(avif|avis|mif1|msf1)$/.test(ascii(8, 12)); },
       jpg:  function () { return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff; },
       jpeg: function () { return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff; },
-      bmp:  function () { return ascii(0, 2) === 'BM'; }
+      bmp:  function () { return ascii(0, 2) === 'BM'; },
+      ico:  function () { return bytes[0] === 0 && bytes[1] === 0 && bytes[2] === 1 && bytes[3] === 0; },
+      tif:  function () { return (ascii(0, 2) === 'II' && bytes[2] === 42) || (ascii(0, 2) === 'MM' && bytes[3] === 42); },
+      tiff: function () { return (ascii(0, 2) === 'II' && bytes[2] === 42) || (ascii(0, 2) === 'MM' && bytes[3] === 42); }
     };
+    // SVG 是唯一会在 Pages 同源域内当作标记语言解析的格式：除清洗外，再做一次结构复核，
+    // 确保清洗后是单一 <svg> 根、且不含任何可执行的动态元素/事件/伪协议。
+    if (ext === 'svgz') {
+      // SVGZ 必须是 gzip 流（1f 8b），否则拒绝，避免伪装。
+      if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) return false;
+    }
+    if (ext === 'svg' || ext === 'svgz') {
+      try {
+        var text = bytesToStr(bytes);
+        var clean = sanitizeSvg(text);
+        if (!clean || !/<svg\b/i.test(clean)) return false;
+        if (/<\s*\/?\s*(script|foreignObject|iframe|object|embed|handler|animate|animateMotion|set)\b/i.test(clean)) return false;
+        if (/\son[a-z]+\s*=/i.test(clean) || /(?:javascript|data|file)\s*:/i.test(clean)) return false;
+      } catch (e) { return false; }
+      return true;
+    }
     if (magic[ext]) return magic[ext]();
     // 未知格式：拒绝明显的脚本/HTML/PE/ELF 头
     var head = ascii(0, Math.min(64, bytes.length)).toLowerCase();
@@ -721,19 +991,43 @@
   function readWriteLog() {
     try {
       var v = JSON.parse(localStorage.getItem(WRITE_LOG_KEY) || '[]');
-      return Array.isArray(v) ? v : [];
+      if (!Array.isArray(v)) return [];
+      // 迁移旧格式：纯数字时间戳 -> { t, id }。
+      return v.map(function (e) {
+        return (e && typeof e === 'object' && typeof e.t === 'number')
+          ? e : { t: Number(e) || 0, id: '' };
+      }).filter(function (e) { return e.t > 0; });
     } catch (e) { return []; }
   }
+  // 配额耗尽时给出带重置时间的友好提示，避免把 403 误判为权限问题。
+  function rateLimitHint(err, fallback) {
+    var reset = Number(err && err.reset);
+    if (reset && isFinite(reset)) {
+      var wait = Math.max(0, Math.ceil((reset * 1000 - Date.now()) / 1000));
+      return 'GitHub API 配额已用尽，请在 ' + wait + ' 秒后重试。';
+    }
+    return fallback;
+  }
+
   function takeWriteSlot() {
     var cfg = window.PUSHPIC_CONFIG || {};
-    var max = cfg.writeBudget || 20;
-    var win = cfg.writeWindowMs || 60000;
+    var max = Math.max(1, Math.min(100, Number(cfg.writeBudget) || 20));
+    var win = Math.max(1000, Math.min(24 * 3600 * 1000, Number(cfg.writeWindowMs) || 60000));
     var now = Date.now();
-    var log = readWriteLog().filter(function (t) { return now - t < win && typeof t === 'number'; });
-    if (log.length >= max) return false;
-    log.push(now);
+    var log = readWriteLog().filter(function (e) { return now - e.t < win; });
+    if (log.length >= max) return null;
+    // 时间戳即票据 id：写入失败时按 id 退还，避免失败请求也消耗配额。
+    var ticket = now + '-' + Math.random().toString(36).slice(2, 8);
+    log.push({ t: now, id: ticket });
     try { localStorage.setItem(WRITE_LOG_KEY, JSON.stringify(log)); } catch (e) {}
-    return true;
+    return ticket;
+  }
+  function releaseWriteSlot(ticket) {
+    if (!ticket) return;
+    try {
+      var log = readWriteLog().filter(function (e) { return !(e && e.id === ticket); });
+      localStorage.setItem(WRITE_LOG_KEY, JSON.stringify(log));
+    } catch (e) {}
   }
 
   // 写入走浏览器直传 GitHub Contents API：支持大文件（<= 50MB），绕开 dispatch 的 48KB 上限。
@@ -741,14 +1035,13 @@
   function writeContents(path, content, sha) {
     return tokenReady.then(function () {
       if (!DISPATCH_TOKEN) {
-        throw new Error(TOKEN_BLOCKED
-          ? '当前域名未启用内置上传令牌（模板副本需自行配置），请在右上角「令牌」填入自己的令牌。'
-          : '上传凭证尚未就绪，请稍后重试或在右上角「令牌」重新配置。');
+        throw new Error('上传需要令牌：请点右上角「令牌」填入自己的 GitHub 令牌（仅存本机，不随站点公开）。');
       }
-      if (!takeWriteSlot()) {
-        throw new Error('操作过于频繁，请在 ' + Math.ceil((window.PUSHPIC_CONFIG.writeWindowMs || 60000) / 1000) + ' 秒后再试。');
+      var slot = takeWriteSlot();
+      if (!slot) {
+        throw new Error('操作过于频繁，请在 ' + Math.ceil((window.PUSHPIC_CONFIG.writeWindowMs || 60000) / 1000) + ' 秒后再试（本地限流）。');
       }
-      var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' + encodePath(path);
+      var url = apiPath('/contents/' + encodePath(path));
       var body = { message: 'Upload ' + path.split('/').pop() + ' via PushPic',
                    content: content, branch: BRANCH };
       if (sha) body.sha = sha;
@@ -756,7 +1049,27 @@
         method: 'PUT',
         headers: jsonHeaders(true),
         body: JSON.stringify(body)
-      }, 2, true); // 写入请求不重试，避免 sha 冲突/重复提交
+      }, 2, true) // 写入请求不盲目重试，避免重复提交
+        .catch(function (err) {
+          // 同名文件已被他人更新导致 sha 过期：按最新 sha 重试一次，避免上传莫名失败。
+          if (err.status !== 409 && err.status !== 422) throw err;
+          return cachedFetch(apiPath('/contents/' + encodePath(path) + '?ref=' + encodeURIComponent(BRANCH)), null, false).then(function (fresh) {
+            var latest = fresh && fresh.sha;
+            if (!latest || latest === sha) throw err;
+            body.sha = latest;
+            return apiFetch(url, {
+              method: 'PUT',
+              headers: jsonHeaders(true),
+              body: JSON.stringify(body)
+            }, 2, true);
+          }).catch(function (e) { if (e === err) throw err; throw e; });
+        })
+        .catch(function (err) {
+          // 写入未成功（鉴权失败 / sha 重试也失败 / 网络错误）就退还配额，
+          // 只有真正写进仓库的操作才计入限流。
+          releaseWriteSlot(slot);
+          throw err;
+        });
     });
   }
 
@@ -768,9 +1081,7 @@
     var path = IMAGE_DIR + '/' + name;
     var known = findFile(path);
     var shaPromise = known && known.sha ? Promise.resolve(known.sha) : (function () {
-      var lookup = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
-        encodePath(path) + '?ref=' + encodeURIComponent(BRANCH);
-      return cachedFetch(lookup, null, false).then(function (existing) {
+      return cachedFetch(apiPath('/contents/' + encodePath(path) + '?ref=' + encodeURIComponent(BRANCH)), null, false).then(function (existing) {
         return (existing && existing.sha ? existing.sha : '');
       }).catch(function () { return ''; });
     })();
@@ -838,6 +1149,9 @@
     star.addEventListener('click', function (e) { e.stopPropagation(); toggleFavorite(path); });
     var img = document.createElement('img');
     img.className = 'tile-thumb';
+    img.referrerPolicy = 'no-referrer';
+    // 固定宽高比占位，图片到位前不塌陷，消除布局抖动（CLS）。
+    img.width = 320; img.height = 200;
     img.src = file.raw || rawUrl(path);
     img.alt = file.name;
     img.loading = 'lazy';
@@ -878,7 +1192,7 @@
     md.title = '复制 Markdown 代码';
     md.addEventListener('click', function () {
       var f = findFile(path) || file;
-      copyText('![' + f.name + '](' + smartUrl(f) + ')', md);
+      copyText(markdownImage(f.name, smartUrl(f)), md);
     });
     var dl = document.createElement('button');
     dl.className = 'btn btn-ghost'; dl.type = 'button'; dl.textContent = '下载';
@@ -924,8 +1238,8 @@
       syncTile(tile, file);
       frag.appendChild(tile);
     });
-    el.gallery.innerHTML = '';
-    el.gallery.appendChild(frag);
+    if (el.gallery.replaceChildren) el.gallery.replaceChildren(frag);
+    else { el.gallery.innerHTML = ''; el.gallery.appendChild(frag); }
     el.pagination.hidden = allPages || files.length <= state.pageSize;
     el.pageInfo.textContent = state.page + ' / ' + totalPages;
     el.prevBtn.disabled = state.page <= 1;
@@ -989,6 +1303,18 @@
     document.body.removeChild(a);
   }
 
+  function escapeMarkdownLabel(s) {
+    return String(s || '').replace(/([\\\[\]])/g, '\\$1').replace(/\r?\n/g, ' ');
+  }
+
+  function markdownUrl(u) {
+    return String(u || '').replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29');
+  }
+
+  function markdownImage(name, url) {
+    return '![' + escapeMarkdownLabel(name) + '](' + markdownUrl(url) + ')';
+  }
+
   function copyText(text, btn) {
     var done = function () {
       var old = btn.textContent;
@@ -1021,6 +1347,7 @@
     state.previewIndex = idx;
     el.previewName.textContent = file.name + (idx >= 0 ? '　' + (idx + 1) + ' / ' + view.length : '');
     var previewSrc = file.raw || rawUrl(file.path);
+    el.previewImg.referrerPolicy = 'no-referrer';
     el.previewImg.onerror = function () {
       el.previewImg.onerror = null;
       el.previewImg.src = displayUrl(file.path);
@@ -1034,7 +1361,7 @@
       ['推荐链接（' + (pagesReady[file.path] ? 'Pages' : 'raw，Pages 部署中') + '）', smart, 'ready'],
       ['Pages 链接' + (pagesReady[file.path] ? '（已上线）' : '（部署中，可能暂时 404）'), pagesLink, pagesReady[file.path] ? 'ready' : 'pending'],
       ['原始文件链接（raw，立即可用）', rawLink, 'ready'],
-      ['Markdown', '![' + file.name + '](' + smart + ')', '']
+      ['Markdown', markdownImage(file.name, smart), '']
     ].forEach(function (pair) {
       var label = document.createElement('div');
       label.className = 'link-label';
@@ -1070,20 +1397,20 @@
     btn.disabled = true;
     // 删除走 Contents API；sha 从 state 或公开 API 获取。
     var shaReady = file.sha ? Promise.resolve(file.sha)
-      : cachedFetch('https://api.github.com/repos/' + OWNER_REPO + '/contents/' +
-          encodePath(file.path) + '?ref=' + encodeURIComponent(BRANCH), null, false)
-          .then(function (d) { return d.sha; });
+      : cachedFetch(apiPath('/contents/' + encodePath(file.path) + '?ref=' + encodeURIComponent(BRANCH)), null, false).then(function (d) { return d.sha; });
     shaReady.then(function (sha) {
       if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('无法获取文件 sha');
       return tokenReady.then(function () {
-        if (!DISPATCH_TOKEN) throw new Error(TOKEN_BLOCKED ? '当前域名未启用内置令牌，无法删除' : '上传凭证尚未就绪，请稍后重试');
-        var url = 'https://api.github.com/repos/' + OWNER_REPO + '/contents/' + encodePath(file.path);
+        if (!DISPATCH_TOKEN) throw new Error('删除需要令牌：请点右上角「令牌」填入自己的 GitHub 令牌（仅存本机）。');
+        var slot = takeWriteSlot();
+        if (!slot) throw new Error('操作过于频繁，请稍后再试（本地限流）。');
+        var url = apiPath('/contents/' + encodePath(file.path));
         return apiFetch(url, {
           method: 'DELETE',
           headers: jsonHeaders(true),
           body: JSON.stringify({ message: 'Delete ' + file.name + ' via PushPic',
                                  sha: sha, branch: BRANCH })
-        }, 2, true);
+        }, 2, true).catch(function (err) { releaseWriteSlot(slot); throw err; });
       });
     }).then(function () {
       state.files = state.files.filter(function (f) { return f.path !== file.path; });
@@ -1104,8 +1431,15 @@
     var label = btn.querySelector('.refresh-label');
     var sub = btn.querySelector('.refresh-sub');
     var now = Date.now();
+    // 缓存优先：有 ETag 缓存时先用它渲染一帧，API 返回后再用权威数据覆盖。
+    if (!state.files.length && !force) {
+      var cached = cachedImageList();
+      if (cached && cached.length) { state.files = cached; scheduleRender(); }
+    }
     // 手动点击时 800ms 内的重复触发直接忽略，防止连点打爆 API。
-    if (force && now - state.lastRefresh < 800) return state.refreshPromise || Promise.resolve(state.files);
+    // 但"上次失败"必须允许立即重试——否则用户点重试没反应，只能干等。
+    var lastFailed = btn.classList.contains('is-error');
+    if (force && !lastFailed && now - state.lastRefresh < 800) return state.refreshPromise || Promise.resolve(state.files);
     if (state.refreshing) return state.refreshPromise;
     state.lastRefresh = now;
     state.refreshing = true;
@@ -1176,7 +1510,12 @@
     var base = (file.name.replace(/\.[^.]+$/, '') || 'image');
     // 写入仓库的文件名只允许安全字符，防路径穿越 / 脚本名 / 控制字符。
     base = base.replace(/[^A-Za-z0-9._()\- ]/g, '_').replace(/^\.+/, '').trim();
-    return base.slice(0, 160) || 'image';
+    // Windows 保留设备名（含扩展名）在部分系统/工具上会被特殊解释，统一加前缀规避。
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(base)) base = 'img-' + base;
+    // 尾部的句点和空格在 Windows 与部分 CDN 路由上会被剥掉，导致外链 404，先去掉。
+    base = base.replace(/[. ]+$/, '');
+    // 限制长度，避免超长文件名在 Pages / 文件系统上截断产生不一致链接。
+    return base.slice(0, 120) || 'image';
   }
 
   // 用 Web Crypto 算内容摘要，同一批里完全相同的文件只上传一次。
@@ -1211,12 +1550,20 @@
     var dedupNote = '';
     // 内容相同的文件只传一份，重复的写入名由 uniqueName 处理（内容不同仍会另存）。
     return mapLimit(list, 8, contentDigest).then(function (digests) {
-      var seen = {};
-      var uploadList = list.filter(function (file, i) {
-        var d = digests[i];
-        if (!d || !seen[d]) { if (d) seen[d] = 1; return true; }
-        return false;
-      });
+      // 可选：内容相同但文件名不同也合并（按 SHA-256）。默认按「文件名+内容」判定重复，
+      // 保持"上传两张同内容不同名得到两个文件"的直觉；开启后省空间也省写入配额。
+      var mergeByName = !POLICY.dedupByContent;
+      var uploadList = (function () {
+        var seen2 = {}, out = [];
+        for (var i = 0; i < list.length; i++) {
+          var d = digests[i], file = list[i];
+          if (!d) { out.push(file); continue; }
+          var key = mergeByName ? (file.name.toLowerCase() + '|' + d) : d;
+          if (seen2[key]) continue;
+          seen2[key] = 1; out.push(file);
+        }
+        return out;
+      })();
       var dup = list.length - uploadList.length;
       if (dup) dedupNote = '已跳过 ' + dup + ' 张内容重复的文件。';
       return doUpload(uploadList, dedupNote);
@@ -1251,6 +1598,19 @@
         if (r && r.error) {
           failed++;
           failNames.push(list[i].name + '（' + r.error.message + '）');
+        }
+      });
+      // 失败的文件释放名字占位，下次重试可用原名；成功的已在 state.files 中。
+      results.forEach(function (r, i) {
+        if (r && r.error) {
+          var n = list[i].name;
+          var dot = n.lastIndexOf('.');
+          var base = dot > 0 ? n.slice(0, dot) : n;
+          var ext = dot > 0 ? n.slice(dot) : '';
+          // uniqueName 可能加了后缀，这里清理所有以该 base 开头的占位。
+          Object.keys(claimedNames).forEach(function (k) {
+            if (k === n.toLowerCase() || k.indexOf(base.toLowerCase() + '-') === 0) delete claimedNames[k];
+          });
         }
       });
       var msg = '上传完成，成功 ' + succeeded + ' 张。raw 链接已可用，Pages 链接上线后会自动标记。';
@@ -1335,6 +1695,17 @@
     el.dropzone.addEventListener('drop', function (e) { uploadFiles(e.dataTransfer.files); });
 
     el.refreshBtn.addEventListener('click', function () { refresh(true).catch(function () {}); });
+
+    // 页面从后台切回且离开超过 60 秒时静默刷新图库，避免展示过期列表；
+    // 短时切换不触发，避免频繁打 API。
+    var hiddenAt = 0;
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (hiddenAt && Date.now() - hiddenAt > 60000) {
+        hiddenAt = 0;
+        refresh(true).catch(function () {});
+      }
+    });
     var searchTimer = null;
     el.searchInput.addEventListener('input', function () {
       var value = el.searchInput.value;
@@ -1366,18 +1737,19 @@
 
     // 令牌设置：拥有者一次性填入「仅触发 Actions」的低权限令牌，保存在本机，不写入仓库。
     function openTokenDialog() {
-      var hint = usingBuiltin()
-        ? '当前使用内置上传凭证，打开即可上传，无需任何配置。'
-        : (DISPATCH_TOKEN ? '当前已配置上传令牌。' : '当前未配置上传令牌（只读模式）。');
+      var hint = DISPATCH_TOKEN ? '当前已在本机配置上传令牌。' : '当前未配置上传令牌（只读模式，可浏览和下载图片）。';
       var val = window.prompt(
-        hint + '\n\n设置上传令牌：需对本仓库有 Contents 读写权限。\n' +
-        '• 经典 PAT：勾选 repo（或 public_repo + Contents 写）\n' +
-        '• 细粒度令牌：仅授权本仓库 Contents: read & write\n' +
-        '令牌用 AES-GCM 加密保存在你的浏览器，不会上传到任何服务器。留空可清除。', '');
+        hint + '\n\n设置上传令牌（仅用于对 images/ 目录读写）：\n' +
+        '• 推荐细粒度令牌：只授权 TechnologySauce/PushPic 一个仓库，权限仅 Contents: read & write\n' +
+        '• 并设置一个较短的过期时间（如 7 天）\n\n' +
+        '安全：本站不含也不公开任何令牌。你填入的令牌用 AES-256-GCM 加密，\n' +
+        '只保存在你自己的浏览器（设备密钥随标签关闭失效），不上传服务器、不进仓库代码。\n' +
+        '请勿使用 public_repo 等大范围权限的经典 PAT——那会授予你全部公开仓库的写权限。\n' +
+        '留空可清除本机令牌。', '');
       if (val === null) return;
       saveDispatchToken(val).then(function () {
         syncTokenBtn();
-        setStatus(val.trim() ? '已加密保存上传令牌（仅本机）。' : '已清除上传令牌。', val.trim() ? 'ok' : '');
+        setStatus(val.trim() ? '已加密保存上传令牌（仅本机，不随站点公开）。' : '已清除上传令牌，回到只读模式。', val.trim() ? 'ok' : '');
       }).catch(function (err) {
         setStatus('保存失败：' + err.message, 'err');
       });
@@ -1385,10 +1757,11 @@
     if (el.tokenBtn) el.tokenBtn.addEventListener('click', openTokenDialog);
 
     tokenReady.then(syncTokenBtn);
-    refresh();
+    refresh(); // 与令牌准备并行，首屏不等 WebCrypto 解密
   }
 
   var boot = function () {
+    loadReadyState();
     init();
     if (location.search.indexOf('test=1') !== -1) {
       window.__pushpicTest = {
